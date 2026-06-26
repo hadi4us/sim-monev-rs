@@ -1,0 +1,16 @@
+<script>
+  function testServer() {
+    document.getElementById('output').textContent = 'Memanggil server...';
+
+    google.script.run
+      .withSuccessHandler(function(response) {
+        document.getElementById('output').textContent =
+          JSON.stringify(response, null, 2);
+      })
+      .withFailureHandler(function(error) {
+        document.getElementById('output').textContent =
+          'ERROR: ' + error.message;
+      })
+      .pingServer();
+  }
+</script>
