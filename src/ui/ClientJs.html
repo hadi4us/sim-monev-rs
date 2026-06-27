@@ -1,16 +1,3962 @@
 <script>
+  const AUTH_TOKEN_KEY = 'SIM_MONEV_RS_AUTH_TOKEN';
+
+  let APP_STATE = {
+    authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
+    currentUser: null,
+    activePeriod: null,
+    dashboard: null,
+    hospitals: [],
+    masterUsers: [],
+    masterRoles: [],
+    masterHospitals: [],
+    masterUnits: [],
+    ui: {
+      instrumentSearch: '',
+      instrumentStatusFilter: '',
+      instrumentPage: 1,
+      instrumentPageSize: 10
+    }
+  };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initApp();
+  });
+
+  function initApp() {
+    if (!APP_STATE.authToken) {
+      renderLogin();
+      return;
+    }
+
+    loadBootstrap();
+  }
+
+  function loadBootstrap() {
+    setLoading('Memuat aplikasi...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError(
+            'Server mengembalikan response kosong.',
+            {
+              hint: 'Cek function getMasterBootstrap(authToken) di Apps Script Editor.'
+            }
+          );
+          renderLogin();
+          return;
+        }
+
+        if (!res.success) {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+          APP_STATE.authToken = '';
+          showError(res.message, res.details);
+          renderLogin();
+          return;
+        }
+
+        APP_STATE.currentUser = res.data.currentUser;
+        APP_STATE.activePeriod = res.data.activePeriod;
+
+        renderUserInfo();
+        renderPageSubtitle();
+        loadDashboard();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat aplikasi: ' + err.message);
+        renderLogin();
+      })
+      .getMasterBootstrap(APP_STATE.authToken);
+  }
+
+  function renderLogin() {
+    document.getElementById('pageTitle').textContent = 'Login';
+    document.getElementById('pageSubtitle').textContent =
+      'Masuk menggunakan email yang terdaftar di MASTER_USER.';
+
+    document.getElementById('userName').textContent = 'Belum login';
+    document.getElementById('userRole').textContent = '-';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Login SIM Monev RS</h2>
+        <p>Masukkan email terdaftar. Sistem akan mengirim kode OTP ke email tersebut.</p>
+
+        <div class="form-grid">
+          <div class="form-group full">
+            <label>Email</label>
+            <input id="login_email" placeholder="email@gmail.com">
+          </div>
+
+          <div class="form-group full">
+            <label>Kode OTP</label>
+            <input id="login_otp" placeholder="6 digit OTP">
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="requestOtpFromForm()">Kirim OTP</button>
+          <button class="button secondary" onclick="verifyOtpFromForm()">Login</button>
+        </div>
+
+        <pre id="loginOutput">Belum ada proses login.</pre>
+      </div>
+    `;
+  }
+
+  function requestOtpFromForm() {
+    const email = getInputValue('login_email');
+    const output = document.getElementById('loginOutput');
+
+    if (!email) {
+      showError('Email wajib diisi.');
+      return;
+    }
+
+    if (output) {
+      output.textContent = 'Mengirim OTP...';
+    }
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          if (output) {
+            output.textContent = JSON.stringify(res || {}, null, 2);
+          }
+
+          showError(res ? res.message : 'Response server kosong.');
+          return;
+        }
+
+        clearAlert();
+
+        if (output) {
+          output.textContent = 'OTP berhasil dikirim. Cek inbox email Anda.';
+        }
+      })
+      .withFailureHandler(function (err) {
+        if (output) {
+          output.textContent = 'ERROR: ' + err.message;
+        }
+
+        showError('Gagal mengirim OTP: ' + err.message);
+      })
+      .requestLoginOtp(email);
+  }
+
+  function verifyOtpFromForm() {
+    const email = getInputValue('login_email');
+    const otp = getInputValue('login_otp');
+    const output = document.getElementById('loginOutput');
+
+    if (!email || !otp) {
+      showError('Email dan OTP wajib diisi.');
+      return;
+    }
+
+    if (output) {
+      output.textContent = 'Memverifikasi OTP...';
+    }
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          if (output) {
+            output.textContent = JSON.stringify(res || {}, null, 2);
+          }
+
+          showError(res ? res.message : 'Login gagal.');
+          return;
+        }
+
+        APP_STATE.authToken = res.data.token;
+        APP_STATE.currentUser = res.data.user;
+
+        localStorage.setItem(AUTH_TOKEN_KEY, APP_STATE.authToken);
+
+        clearAlert();
+        loadBootstrap();
+      })
+      .withFailureHandler(function (err) {
+        if (output) {
+          output.textContent = 'ERROR: ' + err.message;
+        }
+
+        showError('Gagal login: ' + err.message);
+      })
+      .verifyLoginOtp(email, otp);
+  }
+
+  function logoutApp() {
+    const token = APP_STATE.authToken;
+
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+
+    APP_STATE.authToken = '';
+    APP_STATE.currentUser = null;
+    APP_STATE.activePeriod = null;
+    APP_STATE.dashboard = null;
+    APP_STATE.hospitals = [];
+    APP_STATE.masterUsers = [];
+    APP_STATE.masterRoles = [];
+    APP_STATE.masterHospitals = [];
+    APP_STATE.masterUnits = [];
+
+    google.script.run.logout(token);
+
+    clearAlert();
+    renderLogin();
+  }
+
+  function loadDashboard() {
+    setLoading('Memuat dashboard...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError(
+            'Server mengembalikan response dashboard kosong.',
+            {
+              hint: 'Cek function getDashboardSummary(authToken) di Apps Script Editor.'
+            }
+          );
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        APP_STATE.dashboard = res.data;
+
+        clearAlert();
+        renderDashboard();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat dashboard: ' + err.message);
+      })
+      .getDashboardSummary(APP_STATE.authToken);
+  }
+
+  function renderUserInfo() {
+    const user = APP_STATE.currentUser;
+
+    if (!user) {
+      document.getElementById('userName').textContent = 'User tidak terbaca';
+      document.getElementById('userRole').textContent = '-';
+      return;
+    }
+
+    document.getElementById('userName').textContent = user.nama || user.email;
+    document.getElementById('userRole').innerHTML =
+      escapeHtml(user.role + ' | ' + user.email) +
+      '<br><button class="button secondary" style="margin-top:8px;" onclick="logoutApp()">Logout</button>';
+  }
+
+  function renderPageSubtitle() {
+    const period = APP_STATE.activePeriod;
+
+    if (!period) {
+      document.getElementById('pageSubtitle').textContent =
+        'Belum ada periode aktif.';
+      return;
+    }
+
+    document.getElementById('pageSubtitle').textContent =
+      period.nama_periode + ' | Status: ' + period.status;
+  }
+
+  function renderDashboard() {
+    document.getElementById('pageTitle').textContent = 'Dashboard';
+    renderPageSubtitle();
+
+    const data = APP_STATE.dashboard || {};
+    const period = data.periode_aktif;
+
+    const html = `
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">RS Aktif</div>
+          <div class="stat-value">${data.total_rs_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">User Aktif</div>
+          <div class="stat-value">${data.total_user_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Unit Kerja Aktif</div>
+          <div class="stat-value">${data.total_unit_kerja_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Total Periode</div>
+          <div class="stat-value">${data.total_periode || 0}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Periode Aktif</h2>
+
+        ${
+          period
+            ? `
+              <div class="info-grid">
+                <div class="info-label">ID Periode</div>
+                <div class="info-value">${escapeHtml(period.periode_id)}</div>
+
+                <div class="info-label">Nama Periode</div>
+                <div class="info-value">${escapeHtml(period.nama_periode)}</div>
+
+                <div class="info-label">Self Assessment</div>
+                <div class="info-value">
+                  ${formatDateValue(period.tanggal_mulai_self)}
+                  s.d.
+                  ${formatDateValue(period.tanggal_akhir_self)}
+                </div>
+
+                <div class="info-label">Verifikasi</div>
+                <div class="info-value">
+                  ${formatDateValue(period.tanggal_mulai_verif)}
+                  s.d.
+                  ${formatDateValue(period.tanggal_akhir_verif)}
+                </div>
+
+                <div class="info-label">Status</div>
+                <div class="info-value">${escapeHtml(period.status)}</div>
+              </div>
+            `
+            : '<p>Belum ada periode aktif.</p>'
+        }
+      </div>
+
+      <div class="card">
+        <h2>Debug Server</h2>
+        <p>Gunakan tombol ini untuk memastikan koneksi frontend-backend masih aktif.</p>
+        <button class="button" onclick="testServer()">Test Server</button>
+        <pre id="debugOutput">Belum ada response.</pre>
+      </div>
+    `;
+
+    document.getElementById('content').innerHTML = html;
+  }
+
+  function showDashboard() {
+    loadDashboard();
+  }
+
+  function showComingSoon(title) {
+    document.getElementById('pageTitle').textContent = title;
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(title)}</h2>
+        <p>Modul ini akan dibuat pada tahap pengembangan berikutnya.</p>
+      </div>
+    `;
+  }
+
+  function showMasterData() {
+    document.getElementById('pageTitle').textContent = 'Master Data';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola data rumah sakit, user, unit kerja, dan periode.';
+
+    showMasterHospitalTab();
+  }
+
+  function showMasterHospitalTab() {
+    document.getElementById('pageTitle').textContent = 'Master Data';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola data rumah sakit.';
+
+    setLoading('Memuat master data RS...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        renderMasterHospital(res.data.hospitals || []);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat master RS: ' + err.message);
+      })
+      .getHospitalList(APP_STATE.authToken);
+  }
+
+  function renderMasterHospital(hospitals) {
+    APP_STATE.hospitals = hospitals || [];
+
+    const rows = APP_STATE.hospitals.map(function (rs) {
+      const statusClass = rs.status === 'aktif' ? 'active' : 'inactive';
+
+      return `
+        <tr>
+          <td>${escapeHtml(rs.kode_rs || '-')}</td>
+          <td>
+            <strong>${escapeHtml(rs.nama_rs)}</strong><br>
+            <small>${escapeHtml(rs.rs_id)}</small>
+          </td>
+          <td>${escapeHtml(rs.kelas_rs || '-')}</td>
+          <td>${escapeHtml(rs.jenis_rs || '-')}</td>
+          <td>${escapeHtml(rs.kepemilikan || '-')}</td>
+          <td>${escapeHtml(rs.kecamatan || '-')}</td>
+          <td>
+            ${escapeHtml(rs.pic_nama || '-')}<br>
+            <small>${escapeHtml(rs.pic_email || '-')}</small>
+          </td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(rs.status || '-')}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editHospital('${escapeHtml(rs.rs_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button secondary" onclick="showMasterUserTab()">User</button>
+          <button class="button secondary" onclick="showMasterUnitTab()">Unit Kerja</button>
+          <button class="button secondary" onclick="showMasterPeriodTab()">Periode</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form Rumah Sakit</h2>
+
+        <input type="hidden" id="rs_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Kode RS</label>
+            <input id="kode_rs" placeholder="Contoh: RS001">
+          </div>
+
+          <div class="form-group">
+            <label>Nama RS *</label>
+            <input id="nama_rs" placeholder="Nama rumah sakit">
+          </div>
+
+          <div class="form-group">
+            <label>Kelas RS</label>
+            <select id="kelas_rs">
+              <option value="">Pilih</option>
+              <option value="A">A</option>
+              <option value="B">B</option>
+              <option value="C">C</option>
+              <option value="D">D</option>
+              <option value="Belum ditetapkan">Belum ditetapkan</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Jenis RS</label>
+            <select id="jenis_rs">
+              <option value="">Pilih</option>
+              <option value="Umum">Umum</option>
+              <option value="Khusus">Khusus</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Kepemilikan</label>
+            <select id="kepemilikan">
+              <option value="">Pilih</option>
+              <option value="Pemerintah">Pemerintah</option>
+              <option value="Swasta">Swasta</option>
+              <option value="TNI">TNI</option>
+              <option value="Polri">Polri</option>
+              <option value="BUMN">BUMN</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Kecamatan</label>
+            <input id="kecamatan" placeholder="Kecamatan">
+          </div>
+
+          <div class="form-group">
+            <label>Nama PIC</label>
+            <input id="pic_nama" placeholder="Nama PIC RS">
+          </div>
+
+          <div class="form-group">
+            <label>Email PIC</label>
+            <input id="pic_email" placeholder="email@domain.com">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Alamat</label>
+            <textarea id="alamat" rows="2" placeholder="Alamat rumah sakit"></textarea>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveHospitalFromForm()">Simpan RS</button>
+          <button class="button secondary" onclick="resetHospitalForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Rumah Sakit</h2>
+        <p>Total data: ${APP_STATE.hospitals.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Kode</th>
+                <th>Nama RS</th>
+                <th>Kelas</th>
+                <th>Jenis</th>
+                <th>Kepemilikan</th>
+                <th>Kecamatan</th>
+                <th>PIC</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="9">Belum ada data rumah sakit.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveHospitalFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      rs_id: getInputValue('rs_id'),
+      kode_rs: getInputValue('kode_rs'),
+      nama_rs: getInputValue('nama_rs'),
+      kelas_rs: getInputValue('kelas_rs'),
+      jenis_rs: getInputValue('jenis_rs'),
+      kepemilikan: getInputValue('kepemilikan'),
+      alamat: getInputValue('alamat'),
+      kecamatan: getInputValue('kecamatan'),
+      pic_nama: getInputValue('pic_nama'),
+      pic_email: getInputValue('pic_email'),
+      status: getInputValue('status') || 'aktif'
+    };
+
+    if (!payload.nama_rs) {
+      showError('Nama rumah sakit wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan data RS...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong saat simpan RS.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        showMasterHospitalTab();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan RS: ' + err.message);
+      })
+      .saveHospital(payload);
+  }
+
+  function editHospital(rsId) {
+    const hospital = (APP_STATE.hospitals || []).find(function (rs) {
+      return rs.rs_id === rsId;
+    });
+
+    if (!hospital) {
+      showError('Data RS tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('rs_id', hospital.rs_id);
+    setInputValue('kode_rs', hospital.kode_rs);
+    setInputValue('nama_rs', hospital.nama_rs);
+    setInputValue('kelas_rs', hospital.kelas_rs);
+    setInputValue('jenis_rs', hospital.jenis_rs);
+    setInputValue('kepemilikan', hospital.kepemilikan);
+    setInputValue('alamat', hospital.alamat);
+    setInputValue('kecamatan', hospital.kecamatan);
+    setInputValue('pic_nama', hospital.pic_nama);
+    setInputValue('pic_email', hospital.pic_email);
+    setInputValue('status', hospital.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetHospitalForm() {
+    [
+      'rs_id',
+      'kode_rs',
+      'nama_rs',
+      'kelas_rs',
+      'jenis_rs',
+      'kepemilikan',
+      'alamat',
+      'kecamatan',
+      'pic_nama',
+      'pic_email'
+    ].forEach(function (id) {
+      setInputValue(id, '');
+    });
+
+    setInputValue('status', 'aktif');
+  }
+
+  function showMasterUserTab() {
+    document.getElementById('pageTitle').textContent = 'Master User';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola user aplikasi dan hak akses.';
+
+    setLoading('Memuat master user...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.masterUsers = res.data.users || [];
+        APP_STATE.masterRoles = res.data.roles || [];
+        APP_STATE.masterHospitals = res.data.hospitals || [];
+        APP_STATE.masterUnits = res.data.units || [];
+
+        renderMasterUser();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat master user: ' + err.message);
+      })
+      .getMasterUserBootstrap(APP_STATE.authToken);
+  }
+
+  function renderMasterUser() {
+    const users = APP_STATE.masterUsers || [];
+    const roles = APP_STATE.masterRoles || [];
+    const hospitals = APP_STATE.masterHospitals || [];
+    const units = APP_STATE.masterUnits || [];
+
+    const roleOptions = roles.map(function (role) {
+      return `
+        <option value="${escapeHtml(role.role_id)}">
+          ${escapeHtml(role.role_name)} (${escapeHtml(role.role_id)})
+        </option>
+      `;
+    }).join('');
+
+    const hospitalOptions = hospitals.map(function (rs) {
+      return `
+        <option value="${escapeHtml(rs.rs_id)}">
+          ${escapeHtml(rs.nama_rs)}
+        </option>
+      `;
+    }).join('');
+
+    const unitOptions = units.map(function (unit) {
+      return `
+        <option value="${escapeHtml(unit.unit_id)}">
+          ${escapeHtml(unit.nama_unit)}
+        </option>
+      `;
+    }).join('');
+
+    const rows = users.map(function (user) {
+      const statusClass = user.status === 'aktif' ? 'active' : 'inactive';
+      const rsName = getHospitalNameById(user.rs_id);
+      const unitName = getUnitNameById(user.unit_id);
+
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(user.nama)}</strong><br>
+            <small>${escapeHtml(user.user_id)}</small>
+          </td>
+          <td>${escapeHtml(user.email)}</td>
+          <td>${escapeHtml(user.role)}</td>
+          <td>${escapeHtml(rsName || '-')}</td>
+          <td>${escapeHtml(unitName || '-')}</td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(user.status || '-')}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editMasterUser('${escapeHtml(user.user_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button secondary" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button" onclick="showMasterUserTab()">User</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form User</h2>
+
+        <input type="hidden" id="user_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nama User *</label>
+            <input id="user_nama" placeholder="Nama lengkap user">
+          </div>
+
+          <div class="form-group">
+            <label>Email Login *</label>
+            <input id="user_email" placeholder="email@gmail.com">
+          </div>
+
+          <div class="form-group">
+            <label>Role *</label>
+            <select id="user_role" onchange="onUserRoleChange()">
+              <option value="">Pilih role</option>
+              ${roleOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Rumah Sakit</label>
+            <select id="user_rs_id">
+              <option value="">Tidak terkait RS</option>
+              ${hospitalOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Unit Kerja</label>
+            <select id="user_unit_id">
+              <option value="">Tidak terkait unit</option>
+              ${unitOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="user_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveMasterUserFromForm()">Simpan User</button>
+          <button class="button secondary" onclick="resetMasterUserForm()">Reset</button>
+        </div>
+
+        <p style="margin-top: 14px; color: #6b7280;">
+          Catatan: user ADMIN_RS/OPERATOR_RS/REVIEWER_RS/VIEWER_RS wajib terkait RS. User VERIFIKATOR wajib terkait unit kerja.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Daftar User</h2>
+        <p>Total data: ${users.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nama</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>RS</th>
+                <th>Unit</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="7">Belum ada data user.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveMasterUserFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      user_id: getInputValue('user_id'),
+      nama: getInputValue('user_nama'),
+      email: getInputValue('user_email'),
+      role: getInputValue('user_role'),
+      rs_id: getInputValue('user_rs_id'),
+      unit_id: getInputValue('user_unit_id'),
+      status: getInputValue('user_status') || 'aktif'
+    };
+
+    if (!payload.nama) {
+      showError('Nama user wajib diisi.');
+      return;
+    }
+
+    if (!payload.email) {
+      showError('Email user wajib diisi.');
+      return;
+    }
+
+    if (!payload.role) {
+      showError('Role user wajib dipilih.');
+      return;
+    }
+
+    if (
+      ['ADMIN_RS', 'OPERATOR_RS', 'REVIEWER_RS', 'VIEWER_RS'].indexOf(payload.role) !== -1 &&
+      !payload.rs_id
+    ) {
+      showError('User dengan role RS wajib memilih rumah sakit.');
+      return;
+    }
+
+    if (payload.role === 'VERIFIKATOR' && !payload.unit_id) {
+      showError('User VERIFIKATOR wajib memilih unit kerja.');
+      return;
+    }
+
+    setLoading('Menyimpan data user...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong saat simpan user.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        showMasterUserTab();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan user: ' + err.message);
+      })
+      .saveMasterUser(payload);
+  }
+
+  function editMasterUser(userId) {
+    const user = (APP_STATE.masterUsers || []).find(function (row) {
+      return row.user_id === userId;
+    });
+
+    if (!user) {
+      showError('Data user tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('user_id', user.user_id);
+    setInputValue('user_nama', user.nama);
+    setInputValue('user_email', user.email);
+    setInputValue('user_role', user.role);
+    setInputValue('user_rs_id', user.rs_id);
+    setInputValue('user_unit_id', user.unit_id);
+    setInputValue('user_status', user.status || 'aktif');
+
+    onUserRoleChange();
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetMasterUserForm() {
+    [
+      'user_id',
+      'user_nama',
+      'user_email',
+      'user_role',
+      'user_rs_id',
+      'user_unit_id'
+    ].forEach(function (id) {
+      setInputValue(id, '');
+    });
+
+    setInputValue('user_status', 'aktif');
+  }
+
+  function onUserRoleChange() {
+    const role = getInputValue('user_role');
+
+    const rsField = document.getElementById('user_rs_id');
+    const unitField = document.getElementById('user_unit_id');
+
+    if (!rsField || !unitField) {
+      return;
+    }
+
+    if (
+      ['ADMIN_RS', 'OPERATOR_RS', 'REVIEWER_RS', 'VIEWER_RS'].indexOf(role) !== -1
+    ) {
+      unitField.value = '';
+    }
+
+    if (role === 'VERIFIKATOR') {
+      rsField.value = '';
+    }
+
+    if (
+      role === 'SUPER_ADMIN' ||
+      role === 'KOORDINATOR_MONEV'
+    ) {
+      rsField.value = '';
+      unitField.value = '';
+    }
+  }
+
+  function getHospitalNameById(rsId) {
+    if (!rsId) {
+      return '';
+    }
+
+    const hospital = (APP_STATE.masterHospitals || APP_STATE.hospitals || []).find(function (rs) {
+      return rs.rs_id === rsId;
+    });
+
+    return hospital ? hospital.nama_rs : rsId;
+  }
+
+  function getUnitNameById(unitId) {
+    if (!unitId) {
+      return '';
+    }
+
+    const unit = (APP_STATE.masterUnits || []).find(function (row) {
+      return row.unit_id === unitId;
+    });
+
+    return unit ? unit.nama_unit : unitId;
+  }
+
   function testServer() {
-    document.getElementById('output').textContent = 'Memanggil server...';
+    const output = document.getElementById('debugOutput');
+
+    if (output) {
+      output.textContent = 'Memanggil server...';
+    }
 
     google.script.run
       .withSuccessHandler(function(response) {
-        document.getElementById('output').textContent =
-          JSON.stringify(response, null, 2);
+        if (output) {
+          output.textContent = JSON.stringify(response, null, 2);
+        }
       })
       .withFailureHandler(function(error) {
-        document.getElementById('output').textContent =
-          'ERROR: ' + error.message;
+        if (output) {
+          output.textContent = 'ERROR: ' + error.message;
+        }
       })
       .pingServer();
+  }
+
+  function setLoading(message) {
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(message || 'Memuat...')}</h2>
+        <p>Mohon tunggu sebentar.</p>
+      </div>
+    `;
+  }
+
+  function showError(message, details) {
+    const alertBox = document.getElementById('alertBox');
+
+    alertBox.className = 'alert error';
+    alertBox.innerHTML = `
+      <strong>Error:</strong> ${escapeHtml(message)}
+      ${
+        details
+          ? `<pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre>`
+          : ''
+      }
+    `;
+  }
+
+  function clearAlert() {
+    const alertBox = document.getElementById('alertBox');
+
+    alertBox.className = 'alert hidden';
+    alertBox.innerHTML = '';
+  }
+
+  function formatDateValue(value) {
+    if (!value) {
+      return '-';
+    }
+
+    if (typeof value === 'string') {
+      return escapeHtml(value);
+    }
+
+    try {
+      return escapeHtml(new Date(value).toLocaleDateString('id-ID'));
+    } catch (err) {
+      return escapeHtml(String(value));
+    }
+  }
+
+  function getInputValue(id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  }
+
+  function setInputValue(id, value) {
+    const el = document.getElementById(id);
+
+    if (el) {
+      el.value = value || '';
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function loadMasterUnitPeriod(callback) {
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.masterUnits = res.data.units || [];
+        APP_STATE.masterPeriods = res.data.periods || [];
+
+        if (callback) {
+          callback();
+        }
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat unit/periode: ' + err.message);
+      })
+      .getMasterUnitPeriodBootstrap(APP_STATE.authToken);
+  }
+
+  function renderMasterTabs(activeTab) {
+    return `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button ${activeTab === 'rs' ? '' : 'secondary'}" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button ${activeTab === 'user' ? '' : 'secondary'}" onclick="showMasterUserTab()">User</button>
+          <button class="button ${activeTab === 'unit' ? '' : 'secondary'}" onclick="showMasterUnitTab()">Unit Kerja</button>
+          <button class="button ${activeTab === 'periode' ? '' : 'secondary'}" onclick="showMasterPeriodTab()">Periode</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function showMasterUnitTab() {
+    document.getElementById('pageTitle').textContent = 'Master Unit Kerja';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola unit kerja dan bobot penilaian.';
+
+    setLoading('Memuat unit kerja...');
+
+    loadMasterUnitPeriod(function () {
+      renderMasterUnit();
+    });
+  }
+
+  function renderMasterUnit() {
+    const units = APP_STATE.masterUnits || [];
+
+    const rows = units.map(function (unit) {
+      const statusClass = unit.status === 'aktif' ? 'active' : 'inactive';
+
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(unit.nama_unit)}</strong><br>
+            <small>${escapeHtml(unit.unit_id)}</small>
+          </td>
+          <td>${escapeHtml(unit.bobot_unit)}</td>
+          <td>${escapeHtml(unit.urutan)}</td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(unit.status)}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editUnitKerja('${escapeHtml(unit.unit_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      ${renderMasterTabs('unit')}
+
+      <div class="card">
+        <h2>Form Unit Kerja</h2>
+
+        <input type="hidden" id="unit_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nama Unit *</label>
+            <input id="unit_nama" placeholder="Contoh: Surveilans">
+          </div>
+
+          <div class="form-group">
+            <label>Bobot Unit</label>
+            <input id="unit_bobot" type="number" min="0" step="0.01" placeholder="Contoh: 10">
+          </div>
+
+          <div class="form-group">
+            <label>Urutan</label>
+            <input id="unit_urutan" type="number" min="0" step="1" placeholder="Contoh: 1">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="unit_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveUnitKerjaFromForm()">Simpan Unit</button>
+          <button class="button secondary" onclick="resetUnitKerjaForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Unit Kerja</h2>
+        <p>Total data: ${units.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Unit</th>
+                <th>Bobot</th>
+                <th>Urutan</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="5">Belum ada data unit kerja.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveUnitKerjaFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      unit_id: getInputValue('unit_id'),
+      nama_unit: getInputValue('unit_nama'),
+      bobot_unit: getInputValue('unit_bobot') || 0,
+      urutan: getInputValue('unit_urutan') || 0,
+      status: getInputValue('unit_status') || 'aktif'
+    };
+
+    if (!payload.nama_unit) {
+      showError('Nama unit kerja wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan unit kerja...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        showMasterUnitTab();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan unit kerja: ' + err.message);
+      })
+      .saveUnitKerja(payload);
+  }
+
+  function editUnitKerja(unitId) {
+    const unit = (APP_STATE.masterUnits || []).find(function (row) {
+      return row.unit_id === unitId;
+    });
+
+    if (!unit) {
+      showError('Data unit kerja tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('unit_id', unit.unit_id);
+    setInputValue('unit_nama', unit.nama_unit);
+    setInputValue('unit_bobot', unit.bobot_unit);
+    setInputValue('unit_urutan', unit.urutan);
+    setInputValue('unit_status', unit.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetUnitKerjaForm() {
+    setInputValue('unit_id', '');
+    setInputValue('unit_nama', '');
+    setInputValue('unit_bobot', '');
+    setInputValue('unit_urutan', '');
+    setInputValue('unit_status', 'aktif');
+  }
+
+  function showMasterPeriodTab() {
+    document.getElementById('pageTitle').textContent = 'Master Periode';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola periode self assessment dan verifikasi.';
+
+    setLoading('Memuat periode...');
+
+    loadMasterUnitPeriod(function () {
+      renderMasterPeriod();
+    });
+  }
+
+  function renderMasterPeriod() {
+    const periods = APP_STATE.masterPeriods || [];
+
+    const rows = periods.map(function (period) {
+      const statusClass = period.status === 'aktif' ? 'active' : 'inactive';
+
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(period.nama_periode)}</strong><br>
+            <small>${escapeHtml(period.periode_id)}</small>
+          </td>
+          <td>${escapeHtml(period.tanggal_mulai_self)} s.d. ${escapeHtml(period.tanggal_akhir_self)}</td>
+          <td>${escapeHtml(period.tanggal_mulai_verif)} s.d. ${escapeHtml(period.tanggal_akhir_verif)}</td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(period.status)}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editPeriode('${escapeHtml(period.periode_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      ${renderMasterTabs('periode')}
+
+      <div class="card">
+        <h2>Form Periode</h2>
+
+        <input type="hidden" id="periode_id">
+
+        <div class="form-grid">
+          <div class="form-group full">
+            <label>Nama Periode *</label>
+            <input id="periode_nama" placeholder="Contoh: Monev RS Tahun 2026">
+          </div>
+
+          <div class="form-group">
+            <label>Mulai Self Assessment *</label>
+            <input id="periode_mulai_self" type="date">
+          </div>
+
+          <div class="form-group">
+            <label>Akhir Self Assessment *</label>
+            <input id="periode_akhir_self" type="date">
+          </div>
+
+          <div class="form-group">
+            <label>Mulai Verifikasi *</label>
+            <input id="periode_mulai_verif" type="date">
+          </div>
+
+          <div class="form-group">
+            <label>Akhir Verifikasi *</label>
+            <input id="periode_akhir_verif" type="date">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="periode_status">
+              <option value="draft">draft</option>
+              <option value="aktif">aktif</option>
+              <option value="selesai">selesai</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="savePeriodeFromForm()">Simpan Periode</button>
+          <button class="button secondary" onclick="resetPeriodeForm()">Reset</button>
+        </div>
+
+        <p style="margin-top: 14px; color: #6b7280;">
+          Catatan: jika satu periode disimpan sebagai aktif, periode aktif lain otomatis diubah menjadi selesai.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Periode</h2>
+        <p>Total data: ${periods.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Periode</th>
+                <th>Self Assessment</th>
+                <th>Verifikasi</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="5">Belum ada data periode.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function savePeriodeFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      periode_id: getInputValue('periode_id'),
+      nama_periode: getInputValue('periode_nama'),
+      tanggal_mulai_self: getInputValue('periode_mulai_self'),
+      tanggal_akhir_self: getInputValue('periode_akhir_self'),
+      tanggal_mulai_verif: getInputValue('periode_mulai_verif'),
+      tanggal_akhir_verif: getInputValue('periode_akhir_verif'),
+      status: getInputValue('periode_status') || 'draft'
+    };
+
+    if (!payload.nama_periode) {
+      showError('Nama periode wajib diisi.');
+      return;
+    }
+
+    if (!payload.tanggal_mulai_self || !payload.tanggal_akhir_self) {
+      showError('Tanggal self assessment wajib diisi.');
+      return;
+    }
+
+    if (!payload.tanggal_mulai_verif || !payload.tanggal_akhir_verif) {
+      showError('Tanggal verifikasi wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan periode...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        showMasterPeriodTab();
+        loadBootstrap();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan periode: ' + err.message);
+      })
+      .savePeriode(payload);
+  }
+
+  function editPeriode(periodeId) {
+    const period = (APP_STATE.masterPeriods || []).find(function (row) {
+      return row.periode_id === periodeId;
+    });
+
+    if (!period) {
+      showError('Data periode tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('periode_id', period.periode_id);
+    setInputValue('periode_nama', period.nama_periode);
+    setInputValue('periode_mulai_self', period.tanggal_mulai_self);
+    setInputValue('periode_akhir_self', period.tanggal_akhir_self);
+    setInputValue('periode_mulai_verif', period.tanggal_mulai_verif);
+    setInputValue('periode_akhir_verif', period.tanggal_akhir_verif);
+    setInputValue('periode_status', period.status || 'draft');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetPeriodeForm() {
+    setInputValue('periode_id', '');
+    setInputValue('periode_nama', '');
+    setInputValue('periode_mulai_self', '');
+    setInputValue('periode_akhir_self', '');
+    setInputValue('periode_mulai_verif', '');
+    setInputValue('periode_akhir_verif', '');
+    setInputValue('periode_status', 'draft');
+  }
+
+  function showInstrumentBuilder() {
+    document.getElementById('pageTitle').textContent = 'Instrument Builder';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola instrumen, kategori, pertanyaan, pilihan jawaban, dan bobot.';
+
+    setLoading('Memuat instrument builder...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.instrumentPeriods = res.data.periods || [];
+        APP_STATE.instrumentUnits = res.data.units || [];
+        APP_STATE.instruments = res.data.instruments || [];
+        APP_STATE.instrumentCategories = res.data.categories || [];
+        APP_STATE.instrumentQuestions = res.data.questions || [];
+        APP_STATE.instrumentAnswerOptions = res.data.answerOptions || [];
+
+        renderInstrumentBuilder();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat instrument builder: ' + err.message);
+      })
+      .getInstrumentBuilderBootstrap(APP_STATE.authToken);
+  }
+
+  function renderInstrumentBuilder() {
+    const instruments = APP_STATE.instruments || [];
+    const periods = APP_STATE.instrumentPeriods || [];
+    const units = APP_STATE.instrumentUnits || [];
+
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    const search = String(APP_STATE.ui.instrumentSearch || '').toLowerCase();
+    const statusFilter = String(APP_STATE.ui.instrumentStatusFilter || '');
+    const page = Number(APP_STATE.ui.instrumentPage || 1);
+    const pageSize = Number(APP_STATE.ui.instrumentPageSize || 10);
+
+    const filteredInstruments = instruments.filter(function (ins) {
+      const haystack = [
+        ins.instrumen_id,
+        ins.nama_instrumen,
+        getPeriodNameById(ins.periode_id),
+        getInstrumentUnitNameById(ins.unit_id),
+        ins.status,
+        ins.versi
+      ].join(' ').toLowerCase();
+
+      const matchesSearch = !search || haystack.indexOf(search) !== -1;
+      const matchesStatus = !statusFilter || ins.status === statusFilter;
+
+      return matchesSearch && matchesStatus;
+    });
+
+    const paged = paginateArray(filteredInstruments, page, pageSize);
+
+    APP_STATE.ui.instrumentPage = paged.currentPage;
+
+    const periodOptions = periods.map(function (p) {
+      return `
+        <option value="${escapeHtml(p.periode_id)}">
+          ${escapeHtml(p.nama_periode)} (${escapeHtml(p.status)})
+        </option>
+      `;
+    }).join('');
+
+    const unitOptions = units.map(function (u) {
+      return `
+        <option value="${escapeHtml(u.unit_id)}">
+          ${escapeHtml(u.nama_unit)}
+        </option>
+      `;
+    }).join('');
+
+    const rows = paged.items.map(function (ins) {
+      const periodName = getPeriodNameById(ins.periode_id);
+      const unitName = getInstrumentUnitNameById(ins.unit_id);
+      const statusClass = getStatusBadgeClass(ins.status);
+
+      const actionMenu = renderActionMenu([
+        {
+          label: 'Edit',
+          onclick: `editInstrument('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Builder',
+          onclick: `openInstrumentDetail('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Preview',
+          onclick: `previewInstrumentFromUi('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Validasi',
+          onclick: `validateInstrumentFromUi('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Clone Versi',
+          onclick: `openCloneInstrumentForm('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Aktifkan',
+          onclick: `activateInstrumentFromUi('${escapeHtml(ins.instrumen_id)}')`
+        },
+        {
+          label: 'Kunci',
+          onclick: `lockInstrumentFromUi('${escapeHtml(ins.instrumen_id)}')`,
+          danger: true
+        }
+      ]);
+
+      return `
+        <tr>
+          <td class="col-main">
+            <strong>${escapeHtml(ins.nama_instrumen)}</strong>
+            <div class="muted small-text">${escapeHtml(ins.instrumen_id)}</div>
+          </td>
+          <td>${escapeHtml(periodName)}</td>
+          <td>${escapeHtml(unitName)}</td>
+          <td class="text-center">${escapeHtml(ins.versi)}</td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(ins.status)}
+            </span>
+          </td>
+          <td class="action-cell">
+            ${actionMenu}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <div class="section-header">
+          <div>
+            <h2>Form Instrumen</h2>
+            <p class="muted">Buat atau ubah metadata instrumen. Detail kategori, pertanyaan, dan pilihan jawaban dikelola melalui tombol Builder.</p>
+          </div>
+        </div>
+
+        <input type="hidden" id="instrumen_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Periode *</label>
+            <select id="instrumen_periode_id">
+              <option value="">Pilih periode</option>
+              ${periodOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Unit Kerja *</label>
+            <select id="instrumen_unit_id">
+              <option value="">Pilih unit kerja</option>
+              ${unitOptions}
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Nama Instrumen *</label>
+            <input id="instrumen_nama" placeholder="Contoh: Instrumen Monev Surveilans RS 2026">
+          </div>
+
+          <div class="form-group">
+            <label>Versi</label>
+            <input id="instrumen_versi" type="number" min="1" step="1" value="1">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="instrumen_status">
+              <option value="draft">draft</option>
+              <option value="aktif">aktif</option>
+              <option value="terkunci">terkunci</option>
+              <option value="arsip">arsip</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveInstrumentFromForm()">Simpan Instrumen</button>
+          <button class="button secondary" onclick="resetInstrumentForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="section-header">
+          <div>
+            <h2>Daftar Instrumen</h2>
+            <p class="muted">Total data: ${instruments.length}. Hasil filter: ${filteredInstruments.length}.</p>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-search">
+            <input
+              id="instrument_search"
+              placeholder="Cari nama, unit, periode, status..."
+              value="${escapeHtml(APP_STATE.ui.instrumentSearch || '')}"
+              oninput="onInstrumentSearchChange(this.value)"
+            >
+          </div>
+
+          <div class="toolbar-filter">
+            <select id="instrument_status_filter" onchange="onInstrumentStatusFilterChange(this.value)">
+              <option value="">Semua status</option>
+              <option value="draft" ${statusFilter === 'draft' ? 'selected' : ''}>draft</option>
+              <option value="aktif" ${statusFilter === 'aktif' ? 'selected' : ''}>aktif</option>
+              <option value="terkunci" ${statusFilter === 'terkunci' ? 'selected' : ''}>terkunci</option>
+              <option value="arsip" ${statusFilter === 'arsip' ? 'selected' : ''}>arsip</option>
+            </select>
+          </div>
+
+          <button class="button secondary small" onclick="resetInstrumentTableFilter()">
+            Reset Filter
+          </button>
+        </div>
+
+        <div class="table-wrapper">
+          <table class="data-table compact-table">
+            <thead>
+              <tr>
+                <th>Instrumen</th>
+                <th>Periode</th>
+                <th>Unit</th>
+                <th class="text-center">Versi</th>
+                <th>Status</th>
+                <th class="action-cell">Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="6">Tidak ada data instrumen sesuai filter.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+
+        ${renderPaginationControls({
+          currentPage: paged.currentPage,
+          totalPages: paged.totalPages,
+          totalItems: paged.totalItems,
+          startItem: paged.startItem,
+          endItem: paged.endItem,
+          pageSize: paged.pageSize,
+          onPageChange: 'goToInstrumentPage',
+          onPageSizeChange: 'changeInstrumentPageSize'
+        })}
+      </div>
+    `;
+  }
+
+  function onInstrumentSearchChange(value) {
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    APP_STATE.ui.instrumentSearch = value || '';
+    APP_STATE.ui.instrumentPage = 1;
+
+    renderInstrumentBuilder();
+  }
+
+  function onInstrumentStatusFilterChange(value) {
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    APP_STATE.ui.instrumentStatusFilter = value || '';
+    APP_STATE.ui.instrumentPage = 1;
+
+    renderInstrumentBuilder();
+  }
+
+  function goToInstrumentPage(page) {
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    APP_STATE.ui.instrumentPage = Number(page || 1);
+
+    renderInstrumentBuilder();
+  }
+
+  function changeInstrumentPageSize(pageSize) {
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    APP_STATE.ui.instrumentPageSize = Number(pageSize || 10);
+    APP_STATE.ui.instrumentPage = 1;
+
+    renderInstrumentBuilder();
+  }
+
+  function resetInstrumentTableFilter() {
+    if (!APP_STATE.ui) {
+      APP_STATE.ui = {};
+    }
+
+    APP_STATE.ui.instrumentSearch = '';
+    APP_STATE.ui.instrumentStatusFilter = '';
+    APP_STATE.ui.instrumentPage = 1;
+
+    renderInstrumentBuilder();
+  }
+
+  function saveInstrumentFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      instrumen_id: getInputValue('instrumen_id'),
+      periode_id: getInputValue('instrumen_periode_id'),
+      unit_id: getInputValue('instrumen_unit_id'),
+      nama_instrumen: getInputValue('instrumen_nama'),
+      versi: getInputValue('instrumen_versi') || 1,
+      status: getInputValue('instrumen_status') || 'draft'
+    };
+
+    if (!payload.periode_id) {
+      showError('Periode wajib dipilih.');
+      return;
+    }
+
+    if (!payload.unit_id) {
+      showError('Unit kerja wajib dipilih.');
+      return;
+    }
+
+    if (!payload.nama_instrumen) {
+      showError('Nama instrumen wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan instrumen...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        showInstrumentBuilder();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan instrumen: ' + err.message);
+      })
+      .saveInstrument(payload);
+  }
+
+  function editInstrument(instrumenId) {
+    const ins = (APP_STATE.instruments || []).find(function (row) {
+      return row.instrumen_id === instrumenId;
+    });
+
+    if (!ins) {
+      showError('Instrumen tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('instrumen_id', ins.instrumen_id);
+    setInputValue('instrumen_periode_id', ins.periode_id);
+    setInputValue('instrumen_unit_id', ins.unit_id);
+    setInputValue('instrumen_nama', ins.nama_instrumen);
+    setInputValue('instrumen_versi', ins.versi);
+    setInputValue('instrumen_status', ins.status || 'draft');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetInstrumentForm() {
+    setInputValue('instrumen_id', '');
+    setInputValue('instrumen_periode_id', '');
+    setInputValue('instrumen_unit_id', '');
+    setInputValue('instrumen_nama', '');
+    setInputValue('instrumen_versi', '1');
+    setInputValue('instrumen_status', 'draft');
+  }
+
+  function openInstrumentDetail(instrumenId) {
+    const instrument = (APP_STATE.instruments || []).find(function (row) {
+      return row.instrumen_id === instrumenId;
+    });
+
+    if (!instrument) {
+      showError('Instrumen tidak ditemukan.');
+      return;
+    }
+
+    APP_STATE.selectedInstrumentId = instrumenId;
+    renderInstrumentDetail(instrument);
+  }
+
+  function renderInstrumentDetail(instrument) {
+    const categories = (APP_STATE.instrumentCategories || [])
+      .filter(function (cat) {
+        return cat.instrumen_id === instrument.instrumen_id;
+      })
+      .sort(function (a, b) {
+        return a.urutan - b.urutan;
+      });
+
+    const questions = (APP_STATE.instrumentQuestions || [])
+      .filter(function (q) {
+        return q.instrumen_id === instrument.instrumen_id;
+      })
+      .sort(function (a, b) {
+        return a.urutan - b.urutan;
+      });
+
+    const categoryRows = categories.map(function (cat) {
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(cat.nama_kategori)}</strong><br>
+            <small>${escapeHtml(cat.kategori_id)}</small>
+          </td>
+          <td>${escapeHtml(cat.urutan)}</td>
+          <td>${escapeHtml(cat.status)}</td>
+          <td>
+            <button class="button secondary" onclick="editInstrumentCategory('${escapeHtml(cat.kategori_id)}')">Edit</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const questionRows = questions.map(function (q) {
+      const answerCount = (APP_STATE.instrumentAnswerOptions || [])
+        .filter(function (ans) {
+          return ans.question_id === q.question_id;
+        }).length;
+
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(q.pertanyaan)}</strong><br>
+            <small>${escapeHtml(q.question_id)}</small>
+          </td>
+          <td>${escapeHtml(getCategoryNameById(q.kategori))}</td>
+          <td>${escapeHtml(q.tipe_jawaban)}</td>
+          <td>${escapeHtml(q.bobot_pertanyaan)}</td>
+          <td>${escapeHtml(q.wajib_bukti)}</td>
+          <td>${escapeHtml(answerCount)}</td>
+          <td>
+            <button class="button secondary" onclick="editQuestion('${escapeHtml(q.question_id)}')">Edit</button>
+            <button class="button secondary" onclick="openAnswerOptionForm('${escapeHtml(q.question_id)}')">Jawaban</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const categoryOptions = categories.map(function (cat) {
+      return `
+        <option value="${escapeHtml(cat.kategori_id)}">
+          ${escapeHtml(cat.nama_kategori)}
+        </option>
+      `;
+    }).join('');
+
+    document.getElementById('pageTitle').textContent = 'Detail Instrumen';
+    document.getElementById('pageSubtitle').textContent =
+      instrument.nama_instrumen + ' | ' + getInstrumentUnitNameById(instrument.unit_id);
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <button class="button secondary" onclick="showInstrumentBuilder()">← Kembali ke daftar instrumen</button>
+      </div>
+
+      <div class="card">
+        <h2>${escapeHtml(instrument.nama_instrumen)}</h2>
+        <div class="info-grid">
+          <div class="info-label">ID</div>
+          <div class="info-value">${escapeHtml(instrument.instrumen_id)}</div>
+
+          <div class="info-label">Periode</div>
+          <div class="info-value">${escapeHtml(getPeriodNameById(instrument.periode_id))}</div>
+
+          <div class="info-label">Unit</div>
+          <div class="info-value">${escapeHtml(getInstrumentUnitNameById(instrument.unit_id))}</div>
+
+          <div class="info-label">Versi</div>
+          <div class="info-value">${escapeHtml(instrument.versi)}</div>
+
+          <div class="info-label">Status</div>
+          <div class="info-value">${escapeHtml(instrument.status)}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form Kategori</h2>
+
+        <input type="hidden" id="kategori_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nama Kategori *</label>
+            <input id="kategori_nama" placeholder="Contoh: Kewaspadaan Dini">
+          </div>
+
+          <div class="form-group">
+            <label>Urutan</label>
+            <input id="kategori_urutan" type="number" min="0" step="1">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="kategori_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveInstrumentCategoryFromForm()">Simpan Kategori</button>
+          <button class="button secondary" onclick="resetInstrumentCategoryForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Kategori</h2>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Kategori</th>
+                <th>Urutan</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                categoryRows ||
+                `<tr>
+                  <td colspan="4">Belum ada kategori.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form Pertanyaan</h2>
+
+        <input type="hidden" id="question_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Kategori *</label>
+            <select id="question_kategori">
+              <option value="">Pilih kategori</option>
+              ${categoryOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Tipe Jawaban</label>
+            <select id="question_tipe">
+              <option value="pilihan_ganda">pilihan_ganda</option>
+              <option value="ya_tidak">ya_tidak</option>
+              <option value="angka">angka</option>
+              <option value="teks">teks</option>
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Pertanyaan *</label>
+            <textarea id="question_text" rows="3" placeholder="Tulis pertanyaan instrumen"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label>Bobot Pertanyaan</label>
+            <input id="question_bobot" type="number" min="0" step="0.01">
+          </div>
+
+          <div class="form-group">
+            <label>Wajib Bukti</label>
+            <select id="question_wajib_bukti">
+              <option value="tidak">tidak</option>
+              <option value="ya">ya</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Urutan</label>
+            <input id="question_urutan" type="number" min="0" step="1">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="question_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Keterangan Bukti</label>
+            <input id="question_keterangan_bukti" placeholder="Contoh: Upload SOP / laporan / screenshot aplikasi">
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveQuestionFromForm()">Simpan Pertanyaan</button>
+          <button class="button secondary" onclick="resetQuestionForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Pertanyaan</h2>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Pertanyaan</th>
+                <th>Kategori</th>
+                <th>Tipe</th>
+                <th>Bobot</th>
+                <th>Bukti</th>
+                <th>Opsi</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                questionRows ||
+                `<tr>
+                  <td colspan="7">Belum ada pertanyaan.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveInstrumentCategoryFromForm() {
+    const instrument = getSelectedInstrument_();
+
+    if (!instrument) {
+      showError('Instrumen belum dipilih.');
+      return;
+    }
+
+    const payload = {
+      authToken: APP_STATE.authToken,
+      kategori_id: getInputValue('kategori_id'),
+      instrumen_id: instrument.instrumen_id,
+      unit_id: instrument.unit_id,
+      nama_kategori: getInputValue('kategori_nama'),
+      urutan: getInputValue('kategori_urutan') || 0,
+      status: getInputValue('kategori_status') || 'aktif'
+    };
+
+    if (!payload.nama_kategori) {
+      showError('Nama kategori wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan kategori...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        refreshInstrumentAndOpenDetail(instrument.instrumen_id);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan kategori: ' + err.message);
+      })
+      .saveInstrumentCategory(payload);
+  }
+
+  function editInstrumentCategory(kategoriId) {
+    const cat = (APP_STATE.instrumentCategories || []).find(function (row) {
+      return row.kategori_id === kategoriId;
+    });
+
+    if (!cat) {
+      showError('Kategori tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('kategori_id', cat.kategori_id);
+    setInputValue('kategori_nama', cat.nama_kategori);
+    setInputValue('kategori_urutan', cat.urutan);
+    setInputValue('kategori_status', cat.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetInstrumentCategoryForm() {
+    setInputValue('kategori_id', '');
+    setInputValue('kategori_nama', '');
+    setInputValue('kategori_urutan', '');
+    setInputValue('kategori_status', 'aktif');
+  }
+
+  function saveQuestionFromForm() {
+    const instrument = getSelectedInstrument_();
+
+    if (!instrument) {
+      showError('Instrumen belum dipilih.');
+      return;
+    }
+
+    const payload = {
+      authToken: APP_STATE.authToken,
+      question_id: getInputValue('question_id'),
+      instrumen_id: instrument.instrumen_id,
+      unit_id: instrument.unit_id,
+      kategori: getInputValue('question_kategori'),
+      pertanyaan: getInputValue('question_text'),
+      tipe_jawaban: getInputValue('question_tipe') || 'pilihan_ganda',
+      bobot_pertanyaan: getInputValue('question_bobot') || 0,
+      wajib_bukti: getInputValue('question_wajib_bukti') || 'tidak',
+      keterangan_bukti: getInputValue('question_keterangan_bukti'),
+      urutan: getInputValue('question_urutan') || 0,
+      status: getInputValue('question_status') || 'aktif'
+    };
+
+    if (!payload.kategori) {
+      showError('Kategori wajib dipilih.');
+      return;
+    }
+
+    if (!payload.pertanyaan) {
+      showError('Pertanyaan wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan pertanyaan...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        refreshInstrumentAndOpenDetail(instrument.instrumen_id);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan pertanyaan: ' + err.message);
+      })
+      .saveQuestion(payload);
+  }
+
+  function editQuestion(questionId) {
+    const q = (APP_STATE.instrumentQuestions || []).find(function (row) {
+      return row.question_id === questionId;
+    });
+
+    if (!q) {
+      showError('Pertanyaan tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('question_id', q.question_id);
+    setInputValue('question_kategori', q.kategori);
+    setInputValue('question_text', q.pertanyaan);
+    setInputValue('question_tipe', q.tipe_jawaban || 'pilihan_ganda');
+    setInputValue('question_bobot', q.bobot_pertanyaan);
+    setInputValue('question_wajib_bukti', q.wajib_bukti || 'tidak');
+    setInputValue('question_keterangan_bukti', q.keterangan_bukti);
+    setInputValue('question_urutan', q.urutan);
+    setInputValue('question_status', q.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetQuestionForm() {
+    setInputValue('question_id', '');
+    setInputValue('question_kategori', '');
+    setInputValue('question_text', '');
+    setInputValue('question_tipe', 'pilihan_ganda');
+    setInputValue('question_bobot', '');
+    setInputValue('question_wajib_bukti', 'tidak');
+    setInputValue('question_keterangan_bukti', '');
+    setInputValue('question_urutan', '');
+    setInputValue('question_status', 'aktif');
+  }
+
+  function openAnswerOptionForm(questionId) {
+    const question = (APP_STATE.instrumentQuestions || []).find(function (row) {
+      return row.question_id === questionId;
+    });
+
+    if (!question) {
+      showError('Pertanyaan tidak ditemukan.');
+      return;
+    }
+
+    APP_STATE.selectedQuestionId = questionId;
+
+    const answers = (APP_STATE.instrumentAnswerOptions || [])
+      .filter(function (ans) {
+        return ans.question_id === questionId;
+      })
+      .sort(function (a, b) {
+        return a.urutan - b.urutan;
+      });
+
+    const rows = answers.map(function (ans) {
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(ans.label_jawaban)}</strong><br>
+            <small>${escapeHtml(ans.answer_id)}</small>
+          </td>
+          <td>${escapeHtml(ans.nilai_jawaban)}</td>
+          <td>${escapeHtml(ans.urutan)}</td>
+          <td>${escapeHtml(ans.status)}</td>
+          <td>
+            <button class="button secondary" onclick="editAnswerOption('${escapeHtml(ans.answer_id)}')">Edit</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <button class="button secondary" onclick="refreshInstrumentAndOpenDetail('${escapeHtml(question.instrumen_id)}')">
+          ← Kembali ke detail instrumen
+        </button>
+      </div>
+
+      <div class="card">
+        <h2>Pilihan Jawaban</h2>
+        <p><strong>Pertanyaan:</strong> ${escapeHtml(question.pertanyaan)}</p>
+
+        <input type="hidden" id="answer_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Label Jawaban *</label>
+            <input id="answer_label" placeholder="Contoh: Ya / Tidak / Ada / Tidak Ada">
+          </div>
+
+          <div class="form-group">
+            <label>Nilai Jawaban</label>
+            <input id="answer_nilai" type="number" step="0.01" placeholder="Contoh: 1">
+          </div>
+
+          <div class="form-group">
+            <label>Urutan</label>
+            <input id="answer_urutan" type="number" min="0" step="1">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="answer_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveAnswerOptionFromForm()">Simpan Pilihan</button>
+          <button class="button secondary" onclick="resetAnswerOptionForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Pilihan Jawaban</h2>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Nilai</th>
+                <th>Urutan</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="5">Belum ada pilihan jawaban.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveAnswerOptionFromForm() {
+    const questionId = APP_STATE.selectedQuestionId;
+
+    if (!questionId) {
+      showError('Pertanyaan belum dipilih.');
+      return;
+    }
+
+    const payload = {
+      authToken: APP_STATE.authToken,
+      answer_id: getInputValue('answer_id'),
+      question_id: questionId,
+      label_jawaban: getInputValue('answer_label'),
+      nilai_jawaban: getInputValue('answer_nilai') || 0,
+      urutan: getInputValue('answer_urutan') || 0,
+      status: getInputValue('answer_status') || 'aktif'
+    };
+
+    if (!payload.label_jawaban) {
+      showError('Label jawaban wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan pilihan jawaban...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        refreshInstrumentAndOpenAnswerOption(questionId);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan pilihan jawaban: ' + err.message);
+      })
+      .saveAnswerOption(payload);
+  }
+
+  function editAnswerOption(answerId) {
+    const ans = (APP_STATE.instrumentAnswerOptions || []).find(function (row) {
+      return row.answer_id === answerId;
+    });
+
+    if (!ans) {
+      showError('Pilihan jawaban tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('answer_id', ans.answer_id);
+    setInputValue('answer_label', ans.label_jawaban);
+    setInputValue('answer_nilai', ans.nilai_jawaban);
+    setInputValue('answer_urutan', ans.urutan);
+    setInputValue('answer_status', ans.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetAnswerOptionForm() {
+    setInputValue('answer_id', '');
+    setInputValue('answer_label', '');
+    setInputValue('answer_nilai', '');
+    setInputValue('answer_urutan', '');
+    setInputValue('answer_status', 'aktif');
+  }
+
+  function activateInstrumentFromUi(instrumenId) {
+    if (!confirm('Aktifkan instrumen ini?')) {
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal mengaktifkan instrumen.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        showInstrumentBuilder();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal mengaktifkan instrumen: ' + err.message);
+      })
+      .activateInstrument({
+        authToken: APP_STATE.authToken,
+        instrumen_id: instrumenId
+      });
+  }
+
+  function lockInstrumentFromUi(instrumenId) {
+    if (!confirm('Kunci instrumen ini? Setelah dikunci, instrumen tidak bisa diedit.')) {
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal mengunci instrumen.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        showInstrumentBuilder();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal mengunci instrumen: ' + err.message);
+      })
+      .lockInstrument({
+        authToken: APP_STATE.authToken,
+        instrumen_id: instrumenId
+      });
+  }
+
+  function refreshInstrumentAndOpenDetail(instrumenId) {
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        APP_STATE.instrumentPeriods = res.data.periods || [];
+        APP_STATE.instrumentUnits = res.data.units || [];
+        APP_STATE.instruments = res.data.instruments || [];
+        APP_STATE.instrumentCategories = res.data.categories || [];
+        APP_STATE.instrumentQuestions = res.data.questions || [];
+        APP_STATE.instrumentAnswerOptions = res.data.answerOptions || [];
+
+        const instrument = (APP_STATE.instruments || []).find(function (row) {
+          return row.instrumen_id === instrumenId;
+        });
+
+        if (!instrument) {
+          showInstrumentBuilder();
+          return;
+        }
+
+        clearAlert();
+        APP_STATE.selectedInstrumentId = instrumenId;
+        renderInstrumentDetail(instrument);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal refresh instrumen: ' + err.message);
+      })
+      .getInstrumentBuilderBootstrap(APP_STATE.authToken);
+  }
+
+  function refreshInstrumentAndOpenAnswerOption(questionId) {
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Server mengembalikan response kosong.', res ? res.details : null);
+          return;
+        }
+
+        APP_STATE.instrumentPeriods = res.data.periods || [];
+        APP_STATE.instrumentUnits = res.data.units || [];
+        APP_STATE.instruments = res.data.instruments || [];
+        APP_STATE.instrumentCategories = res.data.categories || [];
+        APP_STATE.instrumentQuestions = res.data.questions || [];
+        APP_STATE.instrumentAnswerOptions = res.data.answerOptions || [];
+
+        clearAlert();
+        APP_STATE.selectedQuestionId = questionId;
+        openAnswerOptionForm(questionId);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal refresh pilihan jawaban: ' + err.message);
+      })
+      .getInstrumentBuilderBootstrap(APP_STATE.authToken);
+  }
+
+  function getSelectedInstrument_() {
+    const instrumenId = APP_STATE.selectedInstrumentId;
+
+    if (!instrumenId) {
+      return null;
+    }
+
+    return (APP_STATE.instruments || []).find(function (row) {
+      return row.instrumen_id === instrumenId;
+    }) || null;
+  }
+
+  function getPeriodNameById(periodeId) {
+    const period = (APP_STATE.instrumentPeriods || APP_STATE.masterPeriods || []).find(function (p) {
+      return p.periode_id === periodeId;
+    });
+
+    return period ? period.nama_periode : periodeId;
+  }
+
+  function getInstrumentUnitNameById(unitId) {
+    const unit = (APP_STATE.instrumentUnits || APP_STATE.masterUnits || []).find(function (u) {
+      return u.unit_id === unitId;
+    });
+
+    return unit ? unit.nama_unit : unitId;
+  }
+
+  function getCategoryNameById(kategoriId) {
+    const cat = (APP_STATE.instrumentCategories || []).find(function (c) {
+      return c.kategori_id === kategoriId;
+    });
+
+    return cat ? cat.nama_kategori : kategoriId;
+  }
+
+  function previewInstrumentFromUi(instrumenId) {
+    setLoading('Memuat preview instrumen...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal memuat preview instrumen.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        renderInstrumentPreview(res.data.preview, res.data.validation);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat preview instrumen: ' + err.message);
+      })
+      .getInstrumentPreview({
+        authToken: APP_STATE.authToken,
+        instrumen_id: instrumenId
+      });
+  }
+
+  function validateInstrumentFromUi(instrumenId) {
+    setLoading('Memvalidasi instrumen...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal validasi instrumen.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+        renderInstrumentValidationResult(res.data);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal validasi instrumen: ' + err.message);
+      })
+      .validateInstrumentCompleteness({
+        authToken: APP_STATE.authToken,
+        instrumen_id: instrumenId
+      });
+  }
+
+  function renderInstrumentValidationResult(data) {
+    const validation = data.validation || {};
+    const summary = data.summary || {};
+    const issues = validation.issues || [];
+
+    const issueRows = issues.map(function (issue) {
+      const severityClass = issue.severity === 'error' ? 'danger' : 'warning';
+
+      return `
+        <tr>
+          <td>
+            <span class="badge ${severityClass}">
+              ${escapeHtml(issue.severity)}
+            </span>
+          </td>
+          <td>${escapeHtml(issue.code)}</td>
+          <td>${escapeHtml(issue.message)}</td>
+          <td>${escapeHtml(issue.object_type || '-')}</td>
+          <td>${escapeHtml(issue.object_id || '-')}</td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('pageTitle').textContent = 'Validasi Instrumen';
+    document.getElementById('pageSubtitle').textContent =
+      validation.is_valid ? 'Instrumen valid dan siap digunakan.' : 'Instrumen belum valid.';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <button class="button secondary" onclick="showInstrumentBuilder()">← Kembali ke daftar instrumen</button>
+      </div>
+
+      <div class="card">
+        <h2>Hasil Validasi</h2>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Status</div>
+            <div class="stat-value">${validation.is_valid ? 'VALID' : 'BELUM VALID'}</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-label">Error</div>
+            <div class="stat-value">${validation.error_count || 0}</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-label">Warning</div>
+            <div class="stat-value">${validation.warning_count || 0}</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-label">Skor Maksimal</div>
+            <div class="stat-value">${formatNumberDisplay(summary.estimasi_skor_maksimal || 0)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Ringkasan Instrumen</h2>
+
+        <div class="info-grid">
+          <div class="info-label">Kategori Aktif</div>
+          <div class="info-value">${summary.total_kategori_aktif || 0} dari ${summary.total_kategori || 0}</div>
+
+          <div class="info-label">Pertanyaan Aktif</div>
+          <div class="info-value">${summary.total_pertanyaan_aktif || 0} dari ${summary.total_pertanyaan || 0}</div>
+
+          <div class="info-label">Opsi Jawaban Aktif</div>
+          <div class="info-value">${summary.total_opsi_jawaban_aktif || 0}</div>
+
+          <div class="info-label">Total Bobot Aktif</div>
+          <div class="info-value">${formatNumberDisplay(summary.total_bobot_aktif || 0)}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Temuan Validasi</h2>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Kode</th>
+                <th>Pesan</th>
+                <th>Objek</th>
+                <th>ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                issueRows ||
+                `<tr>
+                  <td colspan="5">Tidak ada error/warning. Instrumen valid.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderInstrumentPreview(preview, validation) {
+    const instrument = preview.instrument || {};
+    const period = preview.period || {};
+    const unit = preview.unit || {};
+    const summary = preview.summary || {};
+    const categories = preview.categories || [];
+    const uncategorizedQuestions = preview.uncategorizedQuestions || [];
+
+    const categoryHtml = categories.map(function (cat) {
+      const questionHtml = (cat.questions || []).map(function (q) {
+        const answerHtml = (q.answerOptions || []).map(function (ans) {
+          return `
+            <tr>
+              <td>${escapeHtml(ans.label_jawaban)}</td>
+              <td>${formatNumberDisplay(ans.nilai_jawaban)}</td>
+              <td>${escapeHtml(ans.urutan)}</td>
+              <td>${escapeHtml(ans.status)}</td>
+            </tr>
+          `;
+        }).join('');
+
+        return `
+          <div class="preview-question">
+            <h4>${escapeHtml(q.urutan)}. ${escapeHtml(q.pertanyaan)}</h4>
+
+            <div class="info-grid compact">
+              <div class="info-label">Tipe</div>
+              <div class="info-value">${escapeHtml(q.tipe_jawaban)}</div>
+
+              <div class="info-label">Bobot</div>
+              <div class="info-value">${formatNumberDisplay(q.bobot_pertanyaan)}</div>
+
+              <div class="info-label">Wajib Bukti</div>
+              <div class="info-value">${escapeHtml(q.wajib_bukti)}</div>
+
+              <div class="info-label">Skor Maksimal</div>
+              <div class="info-value">${formatNumberDisplay(q.skor_maksimal || 0)}</div>
+            </div>
+
+            ${
+              q.keterangan_bukti
+                ? `<p><strong>Keterangan bukti:</strong> ${escapeHtml(q.keterangan_bukti)}</p>`
+                : ''
+            }
+
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Pilihan Jawaban</th>
+                    <th>Nilai</th>
+                    <th>Urutan</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${
+                    answerHtml ||
+                    `<tr>
+                      <td colspan="4">Belum ada pilihan jawaban.</td>
+                    </tr>`
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="card">
+          <h3>${escapeHtml(cat.urutan)}. ${escapeHtml(cat.nama_kategori)}</h3>
+          <p>Status: <span class="badge ${cat.status === 'aktif' ? 'active' : 'inactive'}">${escapeHtml(cat.status)}</span></p>
+
+          ${
+            questionHtml ||
+            `<p>Belum ada pertanyaan pada kategori ini.</p>`
+          }
+        </div>
+      `;
+    }).join('');
+
+    const uncategorizedHtml = uncategorizedQuestions.length
+      ? `
+        <div class="card">
+          <h3>Pertanyaan Tanpa Kategori Valid</h3>
+          ${uncategorizedQuestions.map(function (q) {
+            return `<p><strong>${escapeHtml(q.question_id)}</strong> — ${escapeHtml(q.pertanyaan)}</p>`;
+          }).join('')}
+        </div>
+      `
+      : '';
+
+    document.getElementById('pageTitle').textContent = 'Preview Instrumen';
+    document.getElementById('pageSubtitle').textContent =
+      instrument.nama_instrumen || 'Preview instrumen';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <div class="action-row">
+          <button class="button secondary" onclick="showInstrumentBuilder()">← Kembali ke daftar instrumen</button>
+          <button class="button secondary" onclick="openInstrumentDetail('${escapeHtml(instrument.instrumen_id)}')">Buka Builder</button>
+          <button class="button secondary" onclick="validateInstrumentFromUi('${escapeHtml(instrument.instrumen_id)}')">Validasi</button>
+          <button class="button secondary" onclick="openCloneInstrumentForm('${escapeHtml(instrument.instrumen_id)}')">Clone Versi</button>
+          <button class="button secondary" onclick="activateInstrumentFromUi('${escapeHtml(instrument.instrumen_id)}')">Aktifkan</button>
+          <button class="button danger" onclick="lockInstrumentFromUi('${escapeHtml(instrument.instrumen_id)}')">Kunci</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>${escapeHtml(instrument.nama_instrumen)}</h2>
+
+        <div class="info-grid">
+          <div class="info-label">ID Instrumen</div>
+          <div class="info-value">${escapeHtml(instrument.instrumen_id)}</div>
+
+          <div class="info-label">Periode</div>
+          <div class="info-value">${escapeHtml(period.nama_periode || instrument.periode_id)}</div>
+
+          <div class="info-label">Unit Kerja</div>
+          <div class="info-value">${escapeHtml(unit.nama_unit || instrument.unit_id)}</div>
+
+          <div class="info-label">Versi</div>
+          <div class="info-value">${escapeHtml(instrument.versi)}</div>
+
+          <div class="info-label">Status</div>
+          <div class="info-value">${escapeHtml(instrument.status)}</div>
+
+          <div class="info-label">Validasi</div>
+          <div class="info-value">
+            ${validation.is_valid ? 'VALID' : 'BELUM VALID'}
+            — Error: ${validation.error_count || 0},
+            Warning: ${validation.warning_count || 0}
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Kategori Aktif</div>
+          <div class="stat-value">${summary.total_kategori_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Pertanyaan Aktif</div>
+          <div class="stat-value">${summary.total_pertanyaan_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Total Bobot</div>
+          <div class="stat-value">${formatNumberDisplay(summary.total_bobot_aktif || 0)}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Skor Maksimal</div>
+          <div class="stat-value">${formatNumberDisplay(summary.estimasi_skor_maksimal || 0)}</div>
+        </div>
+      </div>
+
+      ${
+        validation.is_valid
+          ? `
+            <div class="alert success">
+              <strong>Valid:</strong> Instrumen sudah lengkap dan siap diaktifkan/dikunci.
+            </div>
+          `
+          : `
+            <div class="alert error">
+              <strong>Belum valid:</strong> Ada ${validation.error_count || 0} error dan ${validation.warning_count || 0} warning.
+              Klik tombol Validasi untuk melihat detail temuan.
+            </div>
+          `
+      }
+
+      ${categoryHtml || '<div class="card"><p>Belum ada kategori.</p></div>'}
+
+      ${uncategorizedHtml}
+    `;
+  }
+
+  function formatNumberDisplay(value) {
+    const number = Number(value || 0);
+
+    if (Number.isInteger(number)) {
+      return String(number);
+    }
+
+    return number.toFixed(2);
+  }
+
+  function openCloneInstrumentForm(instrumenId) {
+    const source = (APP_STATE.instruments || []).find(function (row) {
+      return row.instrumen_id === instrumenId;
+    });
+
+    if (!source) {
+      showError('Instrumen sumber tidak ditemukan di state frontend. Silakan buka ulang menu Instrumen.');
+      return;
+    }
+
+    const periods = APP_STATE.instrumentPeriods || [];
+    const units = APP_STATE.instrumentUnits || [];
+
+    const nextVersion = Number(source.versi || 1) + 1;
+
+    const periodOptions = periods.map(function (p) {
+      const selected = p.periode_id === source.periode_id ? 'selected' : '';
+
+      return `
+        <option value="${escapeHtml(p.periode_id)}" ${selected}>
+          ${escapeHtml(p.nama_periode)} (${escapeHtml(p.status)})
+        </option>
+      `;
+    }).join('');
+
+    const unitOptions = units.map(function (u) {
+      const selected = u.unit_id === source.unit_id ? 'selected' : '';
+
+      return `
+        <option value="${escapeHtml(u.unit_id)}" ${selected}>
+          ${escapeHtml(u.nama_unit)}
+        </option>
+      `;
+    }).join('');
+
+    const sourceCategories = (APP_STATE.instrumentCategories || [])
+      .filter(function (cat) {
+        return cat.instrumen_id === source.instrumen_id;
+      });
+
+    const sourceQuestions = (APP_STATE.instrumentQuestions || [])
+      .filter(function (q) {
+        return q.instrumen_id === source.instrumen_id;
+      });
+
+    const sourceQuestionIds = sourceQuestions.map(function (q) {
+      return q.question_id;
+    });
+
+    const sourceAnswers = (APP_STATE.instrumentAnswerOptions || [])
+      .filter(function (ans) {
+        return sourceQuestionIds.indexOf(ans.question_id) !== -1;
+      });
+
+    document.getElementById('pageTitle').textContent = 'Clone Versi Instrumen';
+    document.getElementById('pageSubtitle').textContent =
+      'Membuat salinan instrumen sebagai versi draft baru.';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <button class="button secondary" onclick="showInstrumentBuilder()">← Kembali ke daftar instrumen</button>
+      </div>
+
+      <div class="card">
+        <h2>Instrumen Sumber</h2>
+
+        <div class="info-grid">
+          <div class="info-label">ID Instrumen</div>
+          <div class="info-value">${escapeHtml(source.instrumen_id)}</div>
+
+          <div class="info-label">Nama</div>
+          <div class="info-value">${escapeHtml(source.nama_instrumen)}</div>
+
+          <div class="info-label">Periode</div>
+          <div class="info-value">${escapeHtml(getPeriodNameById(source.periode_id))}</div>
+
+          <div class="info-label">Unit</div>
+          <div class="info-value">${escapeHtml(getInstrumentUnitNameById(source.unit_id))}</div>
+
+          <div class="info-label">Versi</div>
+          <div class="info-value">${escapeHtml(source.versi)}</div>
+
+          <div class="info-label">Status</div>
+          <div class="info-value">${escapeHtml(source.status)}</div>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Kategori Disalin</div>
+          <div class="stat-value">${sourceCategories.length}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Pertanyaan Disalin</div>
+          <div class="stat-value">${sourceQuestions.length}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Opsi Jawaban Disalin</div>
+          <div class="stat-value">${sourceAnswers.length}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Versi Baru</div>
+          <div class="stat-value">${nextVersion}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form Clone Versi Baru</h2>
+
+        <input type="hidden" id="clone_source_instrumen_id" value="${escapeHtml(source.instrumen_id)}">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Periode Target *</label>
+            <select id="clone_periode_id">
+              <option value="">Pilih periode</option>
+              ${periodOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Unit Target *</label>
+            <select id="clone_unit_id">
+              <option value="">Pilih unit kerja</option>
+              ${unitOptions}
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Nama Instrumen Baru *</label>
+            <input id="clone_nama_instrumen" value="${escapeHtml(source.nama_instrumen)}">
+          </div>
+
+          <div class="form-group">
+            <label>Versi Baru</label>
+            <input id="clone_versi" type="number" min="1" step="1" value="${nextVersion}">
+          </div>
+
+          <div class="form-group">
+            <label>Status Baru</label>
+            <input value="draft" disabled>
+          </div>
+
+          <div class="form-group full">
+            <label>Catatan Perubahan</label>
+            <textarea id="clone_catatan" rows="3" placeholder="Contoh: Penyesuaian instrumen untuk periode 2027">Clone dari ${escapeHtml(source.instrumen_id)} versi ${escapeHtml(source.versi)}</textarea>
+          </div>
+        </div>
+
+        <div class="alert warning">
+          <strong>Catatan:</strong> hasil clone selalu berstatus <strong>draft</strong>. Setelah clone, lakukan review, preview, validasi, lalu aktifkan/kunci jika sudah final.
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="submitCloneInstrumentFromForm()">Buat Clone Versi Baru</button>
+          <button class="button secondary" onclick="showInstrumentBuilder()">Batal</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function submitCloneInstrumentFromForm() {
+    const payload = {
+      authToken: APP_STATE.authToken,
+      source_instrumen_id: getInputValue('clone_source_instrumen_id'),
+      periode_id: getInputValue('clone_periode_id'),
+      unit_id: getInputValue('clone_unit_id'),
+      nama_instrumen: getInputValue('clone_nama_instrumen'),
+      versi: getInputValue('clone_versi'),
+      catatan_perubahan: getInputValue('clone_catatan')
+    };
+
+    if (!payload.source_instrumen_id) {
+      showError('Instrumen sumber wajib tersedia.');
+      return;
+    }
+
+    if (!payload.periode_id) {
+      showError('Periode target wajib dipilih.');
+      return;
+    }
+
+    if (!payload.unit_id) {
+      showError('Unit target wajib dipilih.');
+      return;
+    }
+
+    if (!payload.nama_instrumen) {
+      showError('Nama instrumen baru wajib diisi.');
+      return;
+    }
+
+    if (!confirm('Buat clone versi baru dari instrumen ini?')) {
+      return;
+    }
+
+    setLoading('Membuat clone versi instrumen...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal membuat clone instrumen.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+
+        const newInstrumenId = res.data.new_instrumen_id;
+
+        google.script.run
+          .withSuccessHandler(function (bootstrapRes) {
+            if (!bootstrapRes || !bootstrapRes.success) {
+              showError(
+                bootstrapRes ? bootstrapRes.message : 'Clone berhasil, tetapi gagal memuat ulang instrumen.',
+                bootstrapRes ? bootstrapRes.details : null
+              );
+              return;
+            }
+
+            APP_STATE.instrumentPeriods = bootstrapRes.data.periods || [];
+            APP_STATE.instrumentUnits = bootstrapRes.data.units || [];
+            APP_STATE.instruments = bootstrapRes.data.instruments || [];
+            APP_STATE.instrumentCategories = bootstrapRes.data.categories || [];
+            APP_STATE.instrumentQuestions = bootstrapRes.data.questions || [];
+            APP_STATE.instrumentAnswerOptions = bootstrapRes.data.answerOptions || [];
+
+            clearAlert();
+
+            const newInstrument = (APP_STATE.instruments || []).find(function (row) {
+              return row.instrumen_id === newInstrumenId;
+            });
+
+            if (newInstrument) {
+              renderInstrumentDetail(newInstrument);
+            } else {
+              showInstrumentBuilder();
+            }
+          })
+          .withFailureHandler(function (err) {
+            showError('Clone berhasil, tetapi gagal refresh data: ' + err.message);
+          })
+          .getInstrumentBuilderBootstrap(APP_STATE.authToken);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal membuat clone instrumen: ' + err.message);
+      })
+      .cloneInstrumentVersion(payload);
+  }
+
+  function paginateArray(items, page, pageSize) {
+    const safeItems = items || [];
+    const safePageSize = Number(pageSize || 10);
+    const totalItems = safeItems.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / safePageSize));
+    const currentPage = Math.min(Math.max(Number(page || 1), 1), totalPages);
+    const startIndex = (currentPage - 1) * safePageSize;
+    const endIndex = startIndex + safePageSize;
+
+    return {
+      items: safeItems.slice(startIndex, endIndex),
+      totalItems: totalItems,
+      totalPages: totalPages,
+      currentPage: currentPage,
+      pageSize: safePageSize,
+      startItem: totalItems === 0 ? 0 : startIndex + 1,
+      endItem: Math.min(endIndex, totalItems)
+    };
+  }
+
+  function renderPaginationControls(config) {
+    const currentPage = Number(config.currentPage || 1);
+    const totalPages = Number(config.totalPages || 1);
+    const totalItems = Number(config.totalItems || 0);
+    const startItem = Number(config.startItem || 0);
+    const endItem = Number(config.endItem || 0);
+    const onPageChange = config.onPageChange;
+    const onPageSizeChange = config.onPageSizeChange;
+    const pageSize = Number(config.pageSize || 10);
+
+    const previousDisabled = currentPage <= 1 ? 'disabled' : '';
+    const nextDisabled = currentPage >= totalPages ? 'disabled' : '';
+
+    return `
+      <div class="pagination-bar">
+        <div class="pagination-info">
+          Menampilkan <strong>${startItem}</strong>–<strong>${endItem}</strong>
+          dari <strong>${totalItems}</strong> data
+        </div>
+
+        <div class="pagination-actions">
+          <select class="pagination-size" onchange="${onPageSizeChange}(this.value)">
+            <option value="5" ${pageSize === 5 ? 'selected' : ''}>5 / halaman</option>
+            <option value="10" ${pageSize === 10 ? 'selected' : ''}>10 / halaman</option>
+            <option value="25" ${pageSize === 25 ? 'selected' : ''}>25 / halaman</option>
+            <option value="50" ${pageSize === 50 ? 'selected' : ''}>50 / halaman</option>
+          </select>
+
+          <button class="button secondary small" ${previousDisabled} onclick="${onPageChange}(${currentPage - 1})">
+            ‹ Prev
+          </button>
+
+          <span class="pagination-page">
+            Halaman ${currentPage} / ${totalPages}
+          </span>
+
+          <button class="button secondary small" ${nextDisabled} onclick="${onPageChange}(${currentPage + 1})">
+            Next ›
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderActionMenu(buttons) {
+    const items = (buttons || []).map(function (btn) {
+      const dangerClass = btn.danger ? 'danger-item' : '';
+
+      return `
+        <button
+          type="button"
+          class="${dangerClass}"
+          onclick="closeActionMenus(); ${btn.onclick}"
+        >
+          ${escapeHtml(btn.label)}
+        </button>
+      `;
+    }).join('');
+
+    return `
+      <div class="action-menu">
+        <button
+          type="button"
+          class="button secondary small action-menu-trigger"
+          onclick="toggleActionMenu(event, this)"
+        >
+          Aksi ▾
+        </button>
+
+        <div class="action-menu-content">
+          ${items}
+        </div>
+      </div>
+    `;
+  }
+
+  function getStatusBadgeClass(status) {
+    const normalized = String(status || '').toLowerCase();
+
+    if (normalized === 'aktif') {
+      return 'active';
+    }
+
+    if (normalized === 'draft') {
+      return 'warning';
+    }
+
+    if (normalized === 'terkunci') {
+      return 'danger';
+    }
+
+    if (normalized === 'nonaktif' || normalized === 'arsip' || normalized === 'selesai') {
+      return 'inactive';
+    }
+
+    return 'inactive';
+  }
+
+  function toggleActionMenu(event, buttonEl) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menu = buttonEl.nextElementSibling;
+
+    if (!menu) {
+      return;
+    }
+
+    const wasOpen = menu.classList.contains('open');
+
+    closeActionMenus();
+
+    if (wasOpen) {
+      return;
+    }
+
+    menu.classList.add('open');
+
+    const rect = buttonEl.getBoundingClientRect();
+
+    const menuWidth = 190;
+    const menuHeight = Math.min(menu.scrollHeight || 260, 320);
+
+    let left = rect.right - menuWidth;
+    let top = rect.bottom + 8;
+
+    if (left < 8) {
+      left = 8;
+    }
+
+    if (left + menuWidth > window.innerWidth - 8) {
+      left = window.innerWidth - menuWidth - 8;
+    }
+
+    if (top + menuHeight > window.innerHeight - 8) {
+      top = rect.top - menuHeight - 8;
+    }
+
+    if (top < 8) {
+      top = 8;
+    }
+
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
+
+  function closeActionMenus() {
+    document.querySelectorAll('.action-menu-content.open').forEach(function (menu) {
+      menu.classList.remove('open');
+      menu.style.left = '';
+      menu.style.top = '';
+    });
+  }
+
+  if (!window.__SIM_MONEV_ACTION_MENU_BOUND__) {
+    window.__SIM_MONEV_ACTION_MENU_BOUND__ = true;
+
+    document.addEventListener('click', function () {
+      closeActionMenus();
+    });
+
+    window.addEventListener('resize', function () {
+      closeActionMenus();
+    });
+
+    window.addEventListener('scroll', function () {
+      closeActionMenus();
+    }, true);
+  }
+
+  function showSelfAssessment() {
+    document.getElementById('pageTitle').textContent = 'Self Assessment RS';
+    document.getElementById('pageSubtitle').textContent =
+      'Pengisian instrumen self assessment rumah sakit.';
+
+    setLoading('Memuat self assessment...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal memuat self assessment.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.selfAssessment = res.data;
+
+        renderSelfAssessmentDashboard(res.data);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat self assessment: ' + err.message);
+      })
+      .getSelfAssessmentDashboard({
+        authToken: APP_STATE.authToken,
+        rs_id: APP_STATE.selectedSelfAssessmentRsId || ''
+      });
+  }
+
+  function renderSelfAssessmentDashboard(data) {
+    const period = data.activePeriod || {};
+    const hospital = data.hospital || {};
+    const assessment = data.assessment || {};
+    const instruments = data.instruments || [];
+    const hospitalOptions = data.hospitalOptions || [];
+
+    const totalInstrument = instruments.length;
+    const completedInstrument = instruments.filter(function (item) {
+      return item.progress_percent >= 100;
+    }).length;
+
+    const averageProgress = totalInstrument === 0
+      ? 0
+      : Math.round(
+          instruments.reduce(function (total, item) {
+            return total + Number(item.progress_percent || 0);
+          }, 0) / totalInstrument
+        );
+
+    const hospitalSelectHtml = hospitalOptions.length
+      ? `
+        <div class="card">
+          <h2>Pilih Rumah Sakit</h2>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Rumah Sakit</label>
+              <select id="self_rs_selector" onchange="changeSelfAssessmentRs(this.value)">
+                ${hospitalOptions.map(function (rs) {
+                  return `
+                    <option value="${escapeHtml(rs.rs_id)}" ${rs.rs_id === hospital.rs_id ? 'selected' : ''}>
+                      ${escapeHtml(rs.nama_rs)}
+                    </option>
+                  `;
+                }).join('')}
+              </select>
+            </div>
+          </div>
+        </div>
+      `
+      : '';
+
+    const rows = instruments.map(function (instrument) {
+      const statusClass = getSelfStatusBadgeClass(instrument.status_pengisian);
+      const publishedStatusClass = getStatusBadgeClass(instrument.status);
+
+      return `
+        <tr>
+          <td class="col-main">
+            <strong>${escapeHtml(instrument.nama_instrumen)}</strong>
+            <div class="muted small-text">${escapeHtml(instrument.instrumen_id)}</div>
+          </td>
+          <td>
+            <strong>${escapeHtml(instrument.unit ? instrument.unit.nama_unit : instrument.unit_id)}</strong>
+            <div class="muted small-text">Bobot unit: ${formatNumberDisplay(instrument.unit ? instrument.unit.bobot_unit : 0)}</div>
+          </td>
+          <td class="text-center">${escapeHtml(instrument.total_questions || 0)}</td>
+          <td class="text-center">${escapeHtml(instrument.answered_questions || 0)}</td>
+          <td>
+            <div class="progress-wrap">
+              <div class="progress-label">${escapeHtml(instrument.progress_percent || 0)}%</div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: ${escapeHtml(instrument.progress_percent || 0)}%;"></div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(instrument.status_pengisian)}
+            </span>
+            <br>
+            <span class="badge ${publishedStatusClass}" style="margin-top:6px;">
+              ${escapeHtml(instrument.status)}
+            </span>
+          </td>
+          <td class="action-cell">
+            <button class="button secondary small" onclick="openSelfAssessmentForm('${escapeHtml(instrument.instrumen_id)}')">
+              Buka Form
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('pageTitle').textContent = 'Self Assessment RS';
+    document.getElementById('pageSubtitle').textContent =
+      `${hospital.nama_rs || '-'} | ${period.nama_periode || '-'}`;
+
+    document.getElementById('content').innerHTML = `
+      ${hospitalSelectHtml}
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Instrumen Tersedia</div>
+          <div class="stat-value">${totalInstrument}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Instrumen Lengkap</div>
+          <div class="stat-value">${completedInstrument}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Progress Rata-rata</div>
+          <div class="stat-value">${averageProgress}%</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Status Self</div>
+          <div class="stat-value small-stat">${escapeHtml(assessment.status_self || '-')}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Informasi Assessment</h2>
+
+        <div class="info-grid">
+          <div class="info-label">Rumah Sakit</div>
+          <div class="info-value">${escapeHtml(hospital.nama_rs || '-')}</div>
+
+          <div class="info-label">Periode</div>
+          <div class="info-value">${escapeHtml(period.nama_periode || '-')}</div>
+
+          <div class="info-label">Self Assessment</div>
+          <div class="info-value">
+            ${escapeHtml(period.tanggal_mulai_self || '-')} s.d. ${escapeHtml(period.tanggal_akhir_self || '-')}
+          </div>
+
+          <div class="info-label">Assessment ID</div>
+          <div class="info-value">${escapeHtml(assessment.assessment_id || '-')}</div>
+
+          <div class="info-label">Status Self</div>
+          <div class="info-value">${escapeHtml(assessment.status_self || '-')}</div>
+
+          <div class="info-label">Nilai Self Saat Ini</div>
+          <div class="info-value">${formatNumberDisplay(assessment.nilai_self || 0)}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="section-header">
+          <div>
+            <h2>Daftar Instrumen Self Assessment</h2>
+            <p class="muted">Buka form untuk melihat pertanyaan dan pilihan jawaban. Fitur simpan draft dibuat pada tahap 6B.</p>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <table class="data-table compact-table">
+            <thead>
+              <tr>
+                <th>Instrumen</th>
+                <th>Unit</th>
+                <th class="text-center">Pertanyaan</th>
+                <th class="text-center">Terisi</th>
+                <th>Progress</th>
+                <th>Status</th>
+                <th class="action-cell">Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="7">Belum ada instrumen aktif/terkunci untuk periode ini.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function changeSelfAssessmentRs(rsId) {
+    APP_STATE.selectedSelfAssessmentRsId = rsId || '';
+    showSelfAssessment();
+  }
+
+  function openSelfAssessmentForm(instrumenId) {
+    document.getElementById('pageTitle').textContent = 'Form Self Assessment';
+    document.getElementById('pageSubtitle').textContent =
+      'Memuat pertanyaan instrumen...';
+
+    setLoading('Memuat form self assessment...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(res ? res.message : 'Gagal memuat form self assessment.', res ? res.details : null);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.selfAssessmentForm = res.data;
+
+        renderSelfAssessmentForm(res.data);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat form self assessment: ' + err.message);
+      })
+      .getSelfAssessmentForm({
+        authToken: APP_STATE.authToken,
+        rs_id: APP_STATE.selectedSelfAssessmentRsId || '',
+        instrumen_id: instrumenId
+      });
+  }
+
+  function renderSelfAssessmentForm(data) {
+    const period = data.activePeriod || {};
+    const hospital = data.hospital || {};
+    const assessment = data.assessment || {};
+    const instrument = data.instrument || {};
+    const unit = data.unit || {};
+    const categories = data.categories || [];
+    const uncategorizedQuestions = data.uncategorizedQuestions || [];
+    const isReadOnly = !!data.isReadOnly;
+
+    const categoryHtml = categories.map(function (category) {
+      const questionHtml = (category.questions || []).map(function (question, index) {
+        return renderSelfAssessmentQuestionCard(question, index + 1, isReadOnly);
+      }).join('');
+
+      return `
+        <div class="card">
+          <h2>${escapeHtml(category.urutan)}. ${escapeHtml(category.nama_kategori)}</h2>
+          <p class="muted">Status kategori: ${escapeHtml(category.status)}</p>
+
+          ${
+            questionHtml ||
+            `<p>Belum ada pertanyaan aktif pada kategori ini.</p>`
+          }
+        </div>
+      `;
+    }).join('');
+
+    const uncategorizedHtml = uncategorizedQuestions.length
+      ? `
+        <div class="card">
+          <h2>Pertanyaan Tanpa Kategori</h2>
+          ${uncategorizedQuestions.map(function (question, index) {
+            return renderSelfAssessmentQuestionCard(question, index + 1, isReadOnly);
+          }).join('')}
+        </div>
+      `
+      : '';
+
+    document.getElementById('pageTitle').textContent = 'Form Self Assessment';
+    document.getElementById('pageSubtitle').textContent =
+      `${hospital.nama_rs || '-'} | ${instrument.nama_instrumen || '-'}`;
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <div class="action-row">
+          <button class="button secondary" onclick="showSelfAssessment()">← Kembali ke daftar instrumen</button>
+          <button class="button" onclick="saveSelfAssessmentDraftFromForm()" ${isReadOnly ? 'disabled' : ''}>Simpan Draft</button>
+          <button class="button secondary" disabled>Submit Unit — Tahap 6C</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>${escapeHtml(instrument.nama_instrumen)}</h2>
+
+        <div class="info-grid">
+          <div class="info-label">Rumah Sakit</div>
+          <div class="info-value">${escapeHtml(hospital.nama_rs || '-')}</div>
+
+          <div class="info-label">Periode</div>
+          <div class="info-value">${escapeHtml(period.nama_periode || '-')}</div>
+
+          <div class="info-label">Unit</div>
+          <div class="info-value">${escapeHtml(unit.nama_unit || instrument.unit_id || '-')}</div>
+
+          <div class="info-label">Versi Instrumen</div>
+          <div class="info-value">${escapeHtml(instrument.versi || '-')}</div>
+
+          <div class="info-label">Status Instrumen</div>
+          <div class="info-value">${escapeHtml(instrument.status || '-')}</div>
+
+          <div class="info-label">Status Assessment</div>
+          <div class="info-value">${escapeHtml(assessment.status_self || '-')}</div>
+        </div>
+      </div>
+
+      ${
+        isReadOnly
+          ? `
+            <div class="alert warning">
+              <strong>Read only:</strong> Assessment sudah disubmit/final sehingga tidak dapat diedit.
+            </div>
+          `
+          : `
+            <div class="alert success">
+              <strong>Mode pengisian:</strong> Form sudah bisa ditampilkan. Penyimpanan draft akan diaktifkan pada Tahap 6B.
+            </div>
+          `
+      }
+
+      ${categoryHtml || '<div class="card"><p>Belum ada kategori aktif.</p></div>'}
+
+      ${uncategorizedHtml}
+    `;
+  }
+
+  function renderSelfAssessmentQuestionCard(question, displayNumber, isReadOnly) {
+    const existingAnswer = question.existingAnswer || {};
+    const answerOptions = question.answerOptions || [];
+    const selectedAnswerId = existingAnswer.answer_id || '';
+
+    const inputName = 'self_answer_' + question.question_id;
+
+    const optionHtml = answerOptions.map(function (option) {
+      const checked = option.answer_id === selectedAnswerId ? 'checked' : '';
+      const disabled = isReadOnly ? 'disabled' : '';
+
+      return `
+        <label class="answer-option">
+          <input
+            type="radio"
+            name="${escapeHtml(inputName)}"
+            value="${escapeHtml(option.answer_id)}"
+            data-question-id="${escapeHtml(question.question_id)}"
+            data-nilai="${escapeHtml(option.nilai_jawaban)}"
+            ${checked}
+            ${disabled}
+          >
+          <span>
+            <strong>${escapeHtml(option.label_jawaban)}</strong>
+            <small>Nilai: ${formatNumberDisplay(option.nilai_jawaban)}</small>
+          </span>
+        </label>
+      `;
+    }).join('');
+
+    return `
+      <div class="self-question-card">
+        <div class="self-question-header">
+          <div>
+            <h3>${escapeHtml(displayNumber)}. ${escapeHtml(question.pertanyaan)}</h3>
+            <p class="muted">
+              Tipe: ${escapeHtml(question.tipe_jawaban)}
+              · Bobot: ${formatNumberDisplay(question.bobot_pertanyaan)}
+              · Wajib bukti: ${escapeHtml(question.wajib_bukti)}
+            </p>
+          </div>
+        </div>
+
+        ${
+          question.keterangan_bukti
+            ? `
+              <div class="evidence-note">
+                <strong>Keterangan bukti:</strong> ${escapeHtml(question.keterangan_bukti)}
+              </div>
+            `
+            : ''
+        }
+
+        <div class="answer-list">
+          ${
+            optionHtml ||
+            `<p class="muted">Belum ada pilihan jawaban aktif untuk pertanyaan ini.</p>`
+          }
+        </div>
+
+        <div class="form-group full">
+          <label>Catatan RS</label>
+          <textarea
+            id="catatan_${escapeHtml(question.question_id)}"
+            rows="2"
+            placeholder="Catatan singkat dari RS"
+            ${isReadOnly ? 'disabled' : ''}
+          >${escapeHtml(existingAnswer.catatan_rs || '')}</textarea>
+        </div>
+
+        ${
+          question.wajib_bukti === 'ya'
+            ? `
+              <div class="upload-placeholder">
+                Upload bukti akan dibuat pada tahap berikutnya.
+              </div>
+            `
+            : ''
+        }
+      </div>
+    `;
+  }
+
+  function getSelfStatusBadgeClass(status) {
+    const normalized = String(status || '').toLowerCase();
+
+    if (normalized === 'lengkap') {
+      return 'active';
+    }
+
+    if (normalized === 'draft') {
+      return 'warning';
+    }
+
+    if (normalized === 'belum_diisi') {
+      return 'inactive';
+    }
+
+    return 'inactive';
+  }
+
+  function saveSelfAssessmentDraftFromForm() {
+    const formData = APP_STATE.selfAssessmentForm;
+
+    if (!formData) {
+      showError('Data form self assessment tidak ditemukan.');
+      return;
+    }
+
+    if (formData.isReadOnly) {
+      showError('Assessment sudah read only dan tidak dapat disimpan.');
+      return;
+    }
+
+    const instrument = formData.instrument || {};
+    const hospital = formData.hospital || {};
+
+    const answers = collectSelfAssessmentDraftAnswers();
+
+    if (answers.length === 0) {
+      showError('Belum ada jawaban atau catatan yang dipilih.');
+      return;
+    }
+
+    const payload = {
+      authToken: APP_STATE.authToken,
+      rs_id: hospital.rs_id || APP_STATE.selectedSelfAssessmentRsId || '',
+      instrumen_id: instrument.instrumen_id,
+      answers: answers
+    };
+
+    setLoading('Menyimpan draft self assessment...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res || !res.success) {
+          showError(
+            res ? res.message : 'Gagal menyimpan draft self assessment.',
+            res ? res.details : null
+          );
+          return;
+        }
+
+        openSelfAssessmentForm(instrument.instrumen_id);
+
+        setTimeout(function () {
+          showSuccess(
+            'Draft berhasil disimpan. Jawaban tersimpan: ' +
+            res.data.saved_count +
+            ', baru: ' +
+            res.data.created_count +
+            ', update: ' +
+            res.data.updated_count +
+            '.'
+          );
+        }, 600);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan draft self assessment: ' + err.message);
+      })
+      .saveSelfAssessmentDraft(payload);
+  }
+
+  function collectSelfAssessmentDraftAnswers() {
+    const formData = APP_STATE.selfAssessmentForm || {};
+    const questions = getAllSelfAssessmentQuestionsFromState(formData);
+
+    return questions
+      .map(function (question) {
+        const inputName = 'self_answer_' + question.question_id;
+        const selectedAnswerId = getCheckedRadioValueByName(inputName);
+        const catatanRs = getInputValue('catatan_' + question.question_id);
+
+        return {
+          question_id: question.question_id,
+          answer_id: selectedAnswerId,
+          catatan_rs: catatanRs
+        };
+      })
+      .filter(function (item) {
+        return item.answer_id || item.catatan_rs;
+      });
+  }
+
+  function getAllSelfAssessmentQuestionsFromState(formData) {
+    const questions = [];
+
+    (formData.categories || []).forEach(function (category) {
+      (category.questions || []).forEach(function (question) {
+        questions.push(question);
+      });
+    });
+
+    (formData.uncategorizedQuestions || []).forEach(function (question) {
+      questions.push(question);
+    });
+
+    return questions;
+  }
+
+  function getCheckedRadioValueByName(name) {
+    const radios = document.getElementsByName(name);
+
+    for (let i = 0; i < radios.length; i++) {
+      if (radios[i].checked) {
+        return radios[i].value;
+      }
+    }
+
+    return '';
+  }
+
+  function showSuccess(message, details) {
+    const alertBox = document.getElementById('alertBox');
+
+    if (!alertBox) {
+      alert(message);
+      return;
+    }
+
+    alertBox.className = 'alert success';
+    alertBox.innerHTML = `
+      <strong>Berhasil:</strong> ${escapeHtml(message)}
+      ${
+        details
+          ? `<pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre>`
+          : ''
+      }
+    `;
   }
 </script>

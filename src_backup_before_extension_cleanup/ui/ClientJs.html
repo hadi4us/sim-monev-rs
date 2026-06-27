@@ -1,0 +1,931 @@
+<script>
+  let APP_STATE = {
+    currentUser: null,
+    activePeriod: null,
+    dashboard: null
+  };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initApp();
+  });
+
+  function initApp() {
+    setLoading('Memuat aplikasi...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError(
+            'Server mengembalikan response kosong.',
+            {
+              hint: 'Cek function getMasterBootstrap() di Apps Script Editor.'
+            }
+          );
+          renderUnauthorized({
+            message: 'Response server kosong.',
+            details: {}
+          });
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          renderUnauthorized(res);
+          return;
+        }
+
+        APP_STATE.currentUser = res.data.currentUser;
+        APP_STATE.activePeriod = res.data.activePeriod;
+
+        renderUserInfo();
+        renderPageSubtitle();
+        loadDashboard();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat aplikasi: ' + err.message);
+      })
+      .getMasterBootstrap();
+  }
+
+  function loadDashboard() {
+    setLoading('Memuat dashboard...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError(
+            'Server mengembalikan response dashboard kosong.',
+            {
+              hint: 'Cek function getDashboardSummary() di Apps Script Editor.'
+            }
+          );
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        APP_STATE.dashboard = res.data;
+        clearAlert();
+        renderDashboard();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat dashboard: ' + err.message);
+      })
+      .getDashboardSummary();
+  }
+
+  function renderUserInfo() {
+    const user = APP_STATE.currentUser;
+
+    if (!user) {
+      document.getElementById('userName').textContent = 'User tidak terbaca';
+      document.getElementById('userRole').textContent = '-';
+      return;
+    }
+
+    document.getElementById('userName').textContent = user.nama || user.email;
+    document.getElementById('userRole').textContent = user.role + ' | ' + user.email;
+  }
+
+  function renderPageSubtitle() {
+    const period = APP_STATE.activePeriod;
+
+    if (!period) {
+      document.getElementById('pageSubtitle').textContent =
+        'Belum ada periode aktif.';
+      return;
+    }
+
+    document.getElementById('pageSubtitle').textContent =
+      period.nama_periode + ' | Status: ' + period.status;
+  }
+
+  function renderDashboard() {
+    document.getElementById('pageTitle').textContent = 'Dashboard';
+
+    const data = APP_STATE.dashboard || {};
+    const period = data.periode_aktif;
+
+    const html = `
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">RS Aktif</div>
+          <div class="stat-value">${data.total_rs_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">User Aktif</div>
+          <div class="stat-value">${data.total_user_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Unit Kerja Aktif</div>
+          <div class="stat-value">${data.total_unit_kerja_aktif || 0}</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Total Periode</div>
+          <div class="stat-value">${data.total_periode || 0}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Periode Aktif</h2>
+
+        ${
+          period
+            ? `
+              <div class="info-grid">
+                <div class="info-label">ID Periode</div>
+                <div class="info-value">${escapeHtml(period.periode_id)}</div>
+
+                <div class="info-label">Nama Periode</div>
+                <div class="info-value">${escapeHtml(period.nama_periode)}</div>
+
+                <div class="info-label">Self Assessment</div>
+                <div class="info-value">
+                  ${formatDateValue(period.tanggal_mulai_self)}
+                  s.d.
+                  ${formatDateValue(period.tanggal_akhir_self)}
+                </div>
+
+                <div class="info-label">Verifikasi</div>
+                <div class="info-value">
+                  ${formatDateValue(period.tanggal_mulai_verif)}
+                  s.d.
+                  ${formatDateValue(period.tanggal_akhir_verif)}
+                </div>
+
+                <div class="info-label">Status</div>
+                <div class="info-value">${escapeHtml(period.status)}</div>
+              </div>
+            `
+            : '<p>Belum ada periode aktif.</p>'
+        }
+      </div>
+
+      <div class="card">
+        <h2>Debug Server</h2>
+        <p>Gunakan tombol ini untuk memastikan koneksi frontend-backend masih aktif.</p>
+        <button class="button" onclick="testServer()">Test Server</button>
+        <pre id="debugOutput">Belum ada response.</pre>
+      </div>
+    `;
+
+    document.getElementById('content').innerHTML = html;
+  }
+
+  function renderUnauthorized(res) {
+    document.getElementById('userName').textContent = 'Tidak terdaftar';
+    document.getElementById('userRole').textContent = '-';
+    document.getElementById('pageTitle').textContent = 'Akses Ditolak';
+    document.getElementById('pageSubtitle').textContent =
+      'User belum terdaftar atau tidak aktif.';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Akses Ditolak</h2>
+        <p>${escapeHtml(res.message)}</p>
+        <pre>${escapeHtml(JSON.stringify(res.details || {}, null, 2))}</pre>
+      </div>
+    `;
+  }
+
+  function setLoading(message) {
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(message || 'Memuat...')}</h2>
+        <p>Mohon tunggu sebentar.</p>
+      </div>
+    `;
+  }
+
+  function showDashboard() {
+    loadDashboard();
+  }
+
+  function showComingSoon(title) {
+    document.getElementById('pageTitle').textContent = title;
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(title)}</h2>
+        <p>Modul ini akan dibuat pada tahap pengembangan berikutnya.</p>
+      </div>
+    `;
+  }
+
+  function showError(message, details) {
+    const alertBox = document.getElementById('alertBox');
+
+    alertBox.className = 'alert error';
+    alertBox.innerHTML = `
+      <strong>Error:</strong> ${escapeHtml(message)}
+      ${
+        details
+          ? `<pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre>`
+          : ''
+      }
+    `;
+  }
+
+  function clearAlert() {
+    const alertBox = document.getElementById('alertBox');
+    alertBox.className = 'alert hidden';
+    alertBox.innerHTML = '';
+  }
+
+  function testServer() {
+    const output = document.getElementById('debugOutput');
+
+    if (output) {
+      output.textContent = 'Memanggil server...';
+    }
+
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (output) {
+          output.textContent = JSON.stringify(response, null, 2);
+        }
+      })
+      .withFailureHandler(function(error) {
+        if (output) {
+          output.textContent = 'ERROR: ' + error.message;
+        }
+      })
+      .pingServer();
+  }
+
+  function formatDateValue(value) {
+    if (!value) {
+      return '-';
+    }
+
+    if (typeof value === 'string') {
+      return escapeHtml(value);
+    }
+
+    try {
+      return escapeHtml(new Date(value).toLocaleDateString('id-ID'));
+    } catch (err) {
+      return escapeHtml(String(value));
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function showMasterData() {
+    document.getElementById('pageTitle').textContent = 'Master Data';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola data rumah sakit, user, unit kerja, dan periode.';
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button secondary" onclick="showMasterUserTab()">User</button>
+        </div>
+      </div>
+    `;
+
+    showMasterHospitalTab();
+  }
+
+  function renderMasterHospital(hospitals) {
+    APP_STATE.hospitals = hospitals || [];
+
+    const rows = APP_STATE.hospitals.map(function (rs) {
+      const statusClass = rs.status === 'aktif' ? 'active' : 'inactive';
+
+      return `
+        <tr>
+          <td>${escapeHtml(rs.kode_rs || '-')}</td>
+          <td>
+            <strong>${escapeHtml(rs.nama_rs)}</strong><br>
+            <small>${escapeHtml(rs.rs_id)}</small>
+          </td>
+          <td>${escapeHtml(rs.kelas_rs || '-')}</td>
+          <td>${escapeHtml(rs.jenis_rs || '-')}</td>
+          <td>${escapeHtml(rs.kepemilikan || '-')}</td>
+          <td>${escapeHtml(rs.kecamatan || '-')}</td>
+          <td>
+            ${escapeHtml(rs.pic_nama || '-')}<br>
+            <small>${escapeHtml(rs.pic_email || '-')}</small>
+          </td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(rs.status || '-')}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editHospital('${escapeHtml(rs.rs_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button secondary" onclick="showMasterUserTab()">User</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form Rumah Sakit</h2>
+
+        <input type="hidden" id="rs_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Kode RS</label>
+            <input id="kode_rs" placeholder="Contoh: RS001">
+          </div>
+
+          <div class="form-group">
+            <label>Nama RS *</label>
+            <input id="nama_rs" placeholder="Nama rumah sakit">
+          </div>
+
+          <div class="form-group">
+            <label>Kelas RS</label>
+            <select id="kelas_rs">
+              <option value="">Pilih</option>
+              <option value="A">A</option>
+              <option value="B">B</option>
+              <option value="C">C</option>
+              <option value="D">D</option>
+              <option value="Belum ditetapkan">Belum ditetapkan</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Jenis RS</label>
+            <select id="jenis_rs">
+              <option value="">Pilih</option>
+              <option value="Umum">Umum</option>
+              <option value="Khusus">Khusus</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Kepemilikan</label>
+            <select id="kepemilikan">
+              <option value="">Pilih</option>
+              <option value="Pemerintah">Pemerintah</option>
+              <option value="Swasta">Swasta</option>
+              <option value="TNI">TNI</option>
+              <option value="Polri">Polri</option>
+              <option value="BUMN">BUMN</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Kecamatan</label>
+            <input id="kecamatan" placeholder="Kecamatan">
+          </div>
+
+          <div class="form-group">
+            <label>Nama PIC</label>
+            <input id="pic_nama" placeholder="Nama PIC RS">
+          </div>
+
+          <div class="form-group">
+            <label>Email PIC</label>
+            <input id="pic_email" placeholder="email@domain.com">
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+
+          <div class="form-group full">
+            <label>Alamat</label>
+            <textarea id="alamat" rows="2" placeholder="Alamat rumah sakit"></textarea>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveHospitalFromForm()">Simpan RS</button>
+          <button class="button secondary" onclick="resetHospitalForm()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daftar Rumah Sakit</h2>
+        <p>Total data: ${APP_STATE.hospitals.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Kode</th>
+                <th>Nama RS</th>
+                <th>Kelas</th>
+                <th>Jenis</th>
+                <th>Kepemilikan</th>
+                <th>Kecamatan</th>
+                <th>PIC</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="9">Belum ada data rumah sakit.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveHospitalFromForm() {
+    const payload = {
+      rs_id: getInputValue('rs_id'),
+      kode_rs: getInputValue('kode_rs'),
+      nama_rs: getInputValue('nama_rs'),
+      kelas_rs: getInputValue('kelas_rs'),
+      jenis_rs: getInputValue('jenis_rs'),
+      kepemilikan: getInputValue('kepemilikan'),
+      alamat: getInputValue('alamat'),
+      kecamatan: getInputValue('kecamatan'),
+      pic_nama: getInputValue('pic_nama'),
+      pic_email: getInputValue('pic_email'),
+      status: getInputValue('status') || 'aktif'
+    };
+
+    if (!payload.nama_rs) {
+      showError('Nama rumah sakit wajib diisi.');
+      return;
+    }
+
+    setLoading('Menyimpan data RS...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong saat simpan RS.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        showMasterData();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan RS: ' + err.message);
+      })
+      .saveHospital(payload);
+  }
+
+  function editHospital(rsId) {
+    const hospital = (APP_STATE.hospitals || []).find(function (rs) {
+      return rs.rs_id === rsId;
+    });
+
+    if (!hospital) {
+      showError('Data RS tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('rs_id', hospital.rs_id);
+    setInputValue('kode_rs', hospital.kode_rs);
+    setInputValue('nama_rs', hospital.nama_rs);
+    setInputValue('kelas_rs', hospital.kelas_rs);
+    setInputValue('jenis_rs', hospital.jenis_rs);
+    setInputValue('kepemilikan', hospital.kepemilikan);
+    setInputValue('alamat', hospital.alamat);
+    setInputValue('kecamatan', hospital.kecamatan);
+    setInputValue('pic_nama', hospital.pic_nama);
+    setInputValue('pic_email', hospital.pic_email);
+    setInputValue('status', hospital.status || 'aktif');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetHospitalForm() {
+    [
+      'rs_id',
+      'kode_rs',
+      'nama_rs',
+      'kelas_rs',
+      'jenis_rs',
+      'kepemilikan',
+      'alamat',
+      'kecamatan',
+      'pic_nama',
+      'pic_email'
+    ].forEach(function (id) {
+      setInputValue(id, '');
+    });
+
+    setInputValue('status', 'aktif');
+  }
+
+  function getInputValue(id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  }
+
+  function setInputValue(id, value) {
+    const el = document.getElementById(id);
+
+    if (el) {
+      el.value = value || '';
+    }
+  }
+
+  function showMasterHospitalTab() {
+    setLoading('Memuat master data RS...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        renderMasterHospital(res.data.hospitals || []);
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat master RS: ' + err.message);
+      })
+      .getHospitalList();
+  }
+
+  function showMasterUserTab() {
+    document.getElementById('pageTitle').textContent = 'Master User';
+    document.getElementById('pageSubtitle').textContent =
+      'Kelola user aplikasi dan hak akses.';
+
+    setLoading('Memuat master user...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+
+        APP_STATE.masterUsers = res.data.users || [];
+        APP_STATE.masterRoles = res.data.roles || [];
+        APP_STATE.masterHospitals = res.data.hospitals || [];
+        APP_STATE.masterUnits = res.data.units || [];
+
+        renderMasterUser();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal memuat master user: ' + err.message);
+      })
+      .getMasterUserBootstrap();
+  }
+
+  function renderMasterUser() {
+    const users = APP_STATE.masterUsers || [];
+    const roles = APP_STATE.masterRoles || [];
+    const hospitals = APP_STATE.masterHospitals || [];
+    const units = APP_STATE.masterUnits || [];
+
+    const roleOptions = roles.map(function (role) {
+      return `
+        <option value="${escapeHtml(role.role_id)}">
+          ${escapeHtml(role.role_name)} (${escapeHtml(role.role_id)})
+        </option>
+      `;
+    }).join('');
+
+    const hospitalOptions = hospitals.map(function (rs) {
+      return `
+        <option value="${escapeHtml(rs.rs_id)}">
+          ${escapeHtml(rs.nama_rs)}
+        </option>
+      `;
+    }).join('');
+
+    const unitOptions = units.map(function (unit) {
+      return `
+        <option value="${escapeHtml(unit.unit_id)}">
+          ${escapeHtml(unit.nama_unit)}
+        </option>
+      `;
+    }).join('');
+
+    const rows = users.map(function (user) {
+      const statusClass = user.status === 'aktif' ? 'active' : 'inactive';
+      const rsName = getHospitalNameById(user.rs_id);
+      const unitName = getUnitNameById(user.unit_id);
+
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(user.nama)}</strong><br>
+            <small>${escapeHtml(user.user_id)}</small>
+          </td>
+          <td>${escapeHtml(user.email)}</td>
+          <td>${escapeHtml(user.role)}</td>
+          <td>${escapeHtml(rsName || '-')}</td>
+          <td>${escapeHtml(unitName || '-')}</td>
+          <td>
+            <span class="badge ${statusClass}">
+              ${escapeHtml(user.status || '-')}
+            </span>
+          </td>
+          <td>
+            <button class="button secondary" onclick="editMasterUser('${escapeHtml(user.user_id)}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    document.getElementById('content').innerHTML = `
+      <div class="card">
+        <h2>Master Data</h2>
+        <div class="action-row">
+          <button class="button secondary" onclick="showMasterHospitalTab()">Rumah Sakit</button>
+          <button class="button" onclick="showMasterUserTab()">User</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Form User</h2>
+
+        <input type="hidden" id="user_id">
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nama User *</label>
+            <input id="user_nama" placeholder="Nama lengkap user">
+          </div>
+
+          <div class="form-group">
+            <label>Email Login *</label>
+            <input id="user_email" placeholder="email@gmail.com">
+          </div>
+
+          <div class="form-group">
+            <label>Role *</label>
+            <select id="user_role" onchange="onUserRoleChange()">
+              <option value="">Pilih role</option>
+              ${roleOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Rumah Sakit</label>
+            <select id="user_rs_id">
+              <option value="">Tidak terkait RS</option>
+              ${hospitalOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Unit Kerja</label>
+            <select id="user_unit_id">
+              <option value="">Tidak terkait unit</option>
+              ${unitOptions}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Status</label>
+            <select id="user_status">
+              <option value="aktif">aktif</option>
+              <option value="nonaktif">nonaktif</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="button" onclick="saveMasterUserFromForm()">Simpan User</button>
+          <button class="button secondary" onclick="resetMasterUserForm()">Reset</button>
+        </div>
+
+        <p style="margin-top: 14px; color: #6b7280;">
+          Catatan: user ADMIN_RS/OPERATOR_RS wajib terkait RS. User VERIFIKATOR wajib terkait unit kerja.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Daftar User</h2>
+        <p>Total data: ${users.length}</p>
+
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nama</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>RS</th>
+                <th>Unit</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr>
+                  <td colspan="7">Belum ada data user.</td>
+                </tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function saveMasterUserFromForm() {
+    const payload = {
+      user_id: getInputValue('user_id'),
+      nama: getInputValue('user_nama'),
+      email: getInputValue('user_email'),
+      role: getInputValue('user_role'),
+      rs_id: getInputValue('user_rs_id'),
+      unit_id: getInputValue('user_unit_id'),
+      status: getInputValue('user_status') || 'aktif'
+    };
+
+    if (!payload.nama) {
+      showError('Nama user wajib diisi.');
+      return;
+    }
+
+    if (!payload.email) {
+      showError('Email user wajib diisi.');
+      return;
+    }
+
+    if (!payload.role) {
+      showError('Role user wajib dipilih.');
+      return;
+    }
+
+    if (
+      ['ADMIN_RS', 'OPERATOR_RS', 'REVIEWER_RS', 'VIEWER_RS'].indexOf(payload.role) !== -1 &&
+      !payload.rs_id
+    ) {
+      showError('User dengan role RS wajib memilih rumah sakit.');
+      return;
+    }
+
+    if (payload.role === 'VERIFIKATOR' && !payload.unit_id) {
+      showError('User VERIFIKATOR wajib memilih unit kerja.');
+      return;
+    }
+
+    setLoading('Menyimpan data user...');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) {
+          showError('Server mengembalikan response kosong saat simpan user.');
+          return;
+        }
+
+        if (!res.success) {
+          showError(res.message, res.details);
+          return;
+        }
+
+        clearAlert();
+        showMasterUserTab();
+      })
+      .withFailureHandler(function (err) {
+        showError('Gagal menyimpan user: ' + err.message);
+      })
+      .saveMasterUser(payload);
+  }
+
+  function editMasterUser(userId) {
+    const user = (APP_STATE.masterUsers || []).find(function (row) {
+      return row.user_id === userId;
+    });
+
+    if (!user) {
+      showError('Data user tidak ditemukan.');
+      return;
+    }
+
+    setInputValue('user_id', user.user_id);
+    setInputValue('user_nama', user.nama);
+    setInputValue('user_email', user.email);
+    setInputValue('user_role', user.role);
+    setInputValue('user_rs_id', user.rs_id);
+    setInputValue('user_unit_id', user.unit_id);
+    setInputValue('user_status', user.status || 'aktif');
+
+    onUserRoleChange();
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetMasterUserForm() {
+    [
+      'user_id',
+      'user_nama',
+      'user_email',
+      'user_role',
+      'user_rs_id',
+      'user_unit_id'
+    ].forEach(function (id) {
+      setInputValue(id, '');
+    });
+
+    setInputValue('user_status', 'aktif');
+  }
+
+  function onUserRoleChange() {
+    const role = getInputValue('user_role');
+
+    const rsField = document.getElementById('user_rs_id');
+    const unitField = document.getElementById('user_unit_id');
+
+    if (!rsField || !unitField) {
+      return;
+    }
+
+    if (['ADMIN_RS', 'OPERATOR_RS', 'REVIEWER_RS', 'VIEWER_RS'].indexOf(role) !== -1) {
+      unitField.value = '';
+    }
+
+    if (role === 'VERIFIKATOR') {
+      rsField.value = '';
+    }
+
+    if (
+      role === 'SUPER_ADMIN' ||
+      role === 'KOORDINATOR_MONEV'
+    ) {
+      rsField.value = '';
+      unitField.value = '';
+    }
+  }
+
+  function getHospitalNameById(rsId) {
+    if (!rsId) {
+      return '';
+    }
+
+    const hospital = (APP_STATE.masterHospitals || []).find(function (rs) {
+      return rs.rs_id === rsId;
+    });
+
+    return hospital ? hospital.nama_rs : rsId;
+  }
+
+  function getUnitNameById(unitId) {
+    if (!unitId) {
+      return '';
+    }
+
+    const unit = (APP_STATE.masterUnits || []).find(function (row) {
+      return row.unit_id === unitId;
+    });
+
+    return unit ? unit.nama_unit : unitId;
+  }
+</script>
